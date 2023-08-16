@@ -6,8 +6,16 @@ use crate::{
         get_funct3, get_funct7, get_imm_b_type, get_imm_i_type, get_imm_j_type, get_imm_s_type,
         get_imm_u_type, get_opcode, get_rd, get_rs1, get_rs2, get_rs3,
     },
-    traps::Trap,
+    traps::{Trap, TrapType},
 };
+
+#[derive(Clone, Copy)]
+pub enum PrivilegeMode {
+    Machine = 0,
+    Supervisor = 1,
+    Reserved = 2,
+    User = 3
+}
 
 // RV32IMA
 #[allow(dead_code)]
@@ -17,33 +25,40 @@ pub struct CPU {
     pub mmu: MMU,
 
     //CSRs
-    mstatus: u32,
-    mstatush: u32,
-    cyclel: u32,
-    cycleh: u32,
-    timerl: u32,
-    timerh: u32,
-    timermatchl: u32,
-    timermatchh: u32,
+    //pub CSRs: [u32; 4096],
 
-    mscratch: u32,
-    mtvec: u32,
-    mie: u32,
-    mip: u32,
+    pub mstatus: u32,
+    pub mstatush: u32,
+    pub cyclel: u32,
+    pub cycleh: u32,
+    pub timerl: u32,
+    pub timerh: u32,
+    pub timermatchl: u32,
+    pub timermatchh: u32,
 
-    mepc: u32,
-    mtval: u32,
-    mcause: u32,
-    extraflags: u32,
+    pub mscratch: u32,
+    pub mtvec: u32,
+    pub mie: u32,
+    pub mip: u32,
 
+    pub mepc: u32,
+    pub mtval: u32,
+    pub mcause: u32,
+    pub privilege: PrivilegeMode,
+    pub wfi: bool,
+    pub reservation_slot : Option<u32>,
     pub stopflag : Option<Arc<AtomicBool>>
+    
 }
+
+
+
 #[allow(dead_code)]
 #[allow(unused_variables)]
 impl CPU {
     pub fn new(mmu: MMU) -> Self {
         let mut x = [0; 32];
-        x[2] = RAM_ADDRESS_END - 0x4000;
+        x[2] = RAM_ADDRESS_END - 0x4;// - 0x4000;
         CPU {
             x,
             pc: 0,
@@ -63,7 +78,9 @@ impl CPU {
             mepc: 0,
             mtval: 0,
             mcause: 0,
-            extraflags: 0,
+            privilege: PrivilegeMode::Machine,
+            wfi: false,
+            reservation_slot: None,
             stopflag: None
         }
     }
@@ -91,6 +108,36 @@ impl CPU {
         self.pc += 4;
         Ok(instr)
     }
+    pub fn process_trap(&mut self, trap: Trap) {
+        match trap.trap_type {
+            TrapType::InstructionAddressMisaligned => todo!(),
+            TrapType::InstructionAccessFault => todo!(),
+            TrapType::IllegalInstruction => todo!(),
+            TrapType::Breakpoint => todo!(),
+            TrapType::LoadAddressMisaligned => todo!(),
+            TrapType::LoadAccessFault => todo!(),
+            TrapType::StoreAddressMisaligned => todo!(),
+            TrapType::StoreAccessFault => todo!(),
+            TrapType::EnvironmentCallFromUMode => todo!(),
+            TrapType::EnvironmentCallFromSMode => todo!(),
+            TrapType::EnvironmentCallFromMMode => todo!(),
+            TrapType::InstructionPageFault => todo!(),
+            TrapType::LoadPageFault => todo!(),
+            TrapType::StorePageFault => todo!(),
+            TrapType::UserSoftwareInterrupt => todo!(),
+            TrapType::SupervisorSoftwareInterrupt => todo!(),
+            TrapType::MachineSoftwareInterrupt => todo!(),
+            TrapType::UserTimerInterrupt => todo!(),
+            TrapType::SupervisorTimerInterrupt => todo!(),
+            TrapType::MachineTimerInterrupt => todo!(),
+            TrapType::UserExternalInterrupt => todo!(),
+            TrapType::SupervisorExternalInterrupt => todo!(),
+            TrapType::MachineExternalInterrupt => todo!(),
+        }
+    }
+
+    
+
     fn fetch(&mut self) -> Result<u32, Trap> {
         self.mmu.fetch_word(self.pc)
     }
@@ -223,7 +270,7 @@ impl CPU {
                     }),
                 },
                 0b111 => match get_funct7(instr) {
-                    0 => self.add(instr),
+                    0 => self.and(instr),
                     1 => self.rem(instr),
                     _ => Err(Trap {
                         trap_type: crate::traps::TrapType::IllegalInstruction,
@@ -306,13 +353,13 @@ impl CPU {
         let imm = get_imm_j_type(instr);
         let t = self.pc.wrapping_add(imm);
         if t & 0b11 == 0 {
-            self.set_x(rd, self.pc + 4);
+            self.set_x(rd, self.pc.wrapping_add(4));
             self.pc = t.wrapping_sub(4);
             Ok(())
         } else {
             Err(Trap {
                 trap_type: crate::traps::TrapType::InstructionAddressMisaligned,
-                value: 0,
+                value: self.pc,
             })
         }
     }
@@ -328,7 +375,7 @@ impl CPU {
         } else {
             Err(Trap {
                 trap_type: crate::traps::TrapType::InstructionAddressMisaligned,
-                value: 0,
+                value: self.pc,
             })
         }
     }
@@ -614,17 +661,71 @@ impl CPU {
         Ok(())
     }
     fn fence(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        Ok(())
     }
     fn fence_i(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        Ok(())
     }
     fn ecall(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        let exception_type = TrapType::EnvironmentCallFromMMode; //TODO: Expand when adding privileges
+        return Err(Trap {
+            trap_type: exception_type,
+            value: self.pc
+        });
     }
     fn ebreak(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        let exception_type = TrapType::Breakpoint;
+        return Err(Trap {
+            trap_type: exception_type,
+            value: self.pc
+        });
     }
+
+    fn get_csr(&self, csr: u16) -> Result<u32, Trap> {
+        //TODO: privileges check
+        Ok(match csr {
+            0x340 =>  self.mscratch,
+			0x305 =>  self.mtvec,
+			0x304 =>  self.mie,
+			0xC00 =>  self.cyclel,
+            0xC80 =>  self.cycleh,
+			0x344 =>  self.mip,
+			0x341 =>  self.mepc,
+			0x300 =>  self.mstatus, //mstatus
+			0x342 =>  self.mcause,
+			0x343 =>  self.mtval,
+            0xf11 =>  0xff0ff0ff, //vendorId
+			0xf12 =>  0x0,      //marchid
+            0xf13 =>  0x0,      //mimpid
+            0xf14 =>  0x0,      //mhartid
+            0xf15 =>  0x0,      //mconfigptr
+            0x301 =>  0b01_0_10000_00000000_00010001_00000001, //misa, XLEN=32, IMA+X
+            
+            _ => todo!("CSR {csr:0x} not implemented")
+        })
+    }
+    //Is register writable 
+    fn set_csr(&mut self, csr: u16, new_val: u32) -> Result<bool, Trap> {
+        //TODO: privileges check
+        match csr {
+            0x340 =>  self.mscratch = new_val,
+			0x305 =>  self.mtvec = new_val,
+			0x304 =>  self.mie = new_val,
+			0xC00 =>  {return Ok(false);}, //cyclel
+            0xC80 =>  {return Ok(false);}, //cycleh
+			0x344 =>  self.mip = new_val,
+			0x341 =>  self.mepc = new_val,
+			0x300 =>  self.mstatus = new_val, //mstatus
+            0x310 =>  self.mstatush = new_val,
+			0x342 =>  self.mcause = new_val,
+			0x343 =>  self.mtval = new_val,
+            0xf11..=0xf15 =>  {return Ok(false);}, //vendorId
+			0x301 =>  {return Ok(false);}, //misa, XLEN=32, IMA+X
+            _ => todo!("CSR 0x{csr:0x} not implemented")
+        };
+        Ok(true)
+    }
+
     fn csrrw(&mut self, instr: u32) -> Result<(), Trap> {
         todo!()
     }

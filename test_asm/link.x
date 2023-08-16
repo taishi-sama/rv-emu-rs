@@ -10,6 +10,6 @@ SECTIONS
   .text : { *(.text) }
   .data : { *(.data) }
   .bss : { *(.bss) }
-  . =  ORIGIN(RAM) + LENGTH(RAM) - 0x4000;
+  . =  ORIGIN(RAM) + LENGTH(RAM) - 0x4;
   .stack : {*(.stack)}
 }

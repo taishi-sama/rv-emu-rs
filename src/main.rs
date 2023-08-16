@@ -14,7 +14,7 @@ pub mod emulator;
 
 fn main() {
     //let mut m = mmu::MMU::default();
-    let path = "./rust_riscv/target/riscv32i-unknown-none-elf/debug/rust_riscv";
+    let path = "./bad_apple/target/riscv32i-unknown-none-elf/release/bad_apple";
     //let path = "./test_asm/target/testadd.s.elf";
     println!("Loading elf \"{}\"", path);
     let mut elf_file = File::open(path).unwrap();
@@ -116,6 +116,11 @@ mod test {
     #[test]
     pub fn test_sll(){
         let path = "./test_asm/target/testsll.s.elf";
+        run_arch_tests(Path::new(path));
+    }
+    #[test]
+    pub fn test_bltu(){
+        let path = "./test_asm/target/testbltu.s.elf";
         run_arch_tests(Path::new(path));
     }
 }
