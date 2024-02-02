@@ -1,6 +1,6 @@
 //From https://github.com/takahirox/riscv-rust/blob/master/src/elf_analyzer.rs
 
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
 
 use crate::mmu::MMU;
 

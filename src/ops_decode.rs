@@ -1,6 +1,13 @@
+//Shift number by $shift bits and trim $mask amount of bits. 
 macro_rules! shift_and_trim {
     ($u:expr, $shift:expr, $mask:expr) => {
         ($u >> $shift & (u32::MAX >> (32 - $mask))) as _
+    };
+}
+//Shift number by $shift bits and trim $mask amount of bits. 
+macro_rules! shift_and_trim16 {
+    ($u:expr, $shift:expr, $mask:expr) => {
+        ($u >> $shift & (u16::MAX >> (16 - $mask))) as _
     };
 }
 #[inline(always)]
@@ -21,6 +28,12 @@ fn sign_extend32(data: u32, size: u32) -> u32 {
     debug_assert!(size > 0 && size <= 32);
     (((data << (32 - size)) as i32) >> (32 - size)) as u32
 }
+#[inline]
+fn sign_extend16(data: u16, size: u16) -> u16 {
+    debug_assert!(size > 0 && size <= 16);
+    (((data << (16 - size)) as i16) >> (16 - size)) as u16
+}
+
 
 #[inline]
 pub fn get_opcode(instruction: u32) -> u8 {
@@ -101,9 +114,39 @@ pub fn get_compressed_func3(instruction: u16) -> u16 {
 pub fn get_compressed_func4(instruction: u16) -> u16 {
     instruction >> 12
 }
-
-
-
+// rs1'
+pub fn get_compressed_rs1c(instruction: u16) -> u8 {
+    shift_and_trim16!(instruction, 7, 3)
+}
+// rs2'/rd'
+pub fn get_compressed_rdc(instruction: u16) -> u8 {
+    shift_and_trim16!(instruction, 2, 3)
+}
+pub fn get_compressed_cj_imm(instruction: u16) -> u32 {
+    let raw_imm: u32 = shift_and_trim16!(instruction, 2, 11);
+    let off5: u32 = shift_and_trim!(raw_imm, 0, 1);
+    let off3_1: u32 = shift_and_trim!(raw_imm, 1, 3);
+    let off7: u32 = shift_and_trim!(raw_imm, 4, 1);
+    let off6: u32 = shift_and_trim!(raw_imm, 5, 1);
+    let off10: u32 = shift_and_trim!(raw_imm, 6, 1);
+    let off9_8: u32 = shift_and_trim!(raw_imm, 7, 2);
+    let off4: u32 = shift_and_trim!(raw_imm, 9, 1);
+    let off11: u32 = shift_and_trim!(raw_imm, 10, 1);
+    sign_extend32(off3_1 << 1 | off4 << 4 | off5 << 5 | off6 << 6 | off7 << 7 | off9_8 << 8 | off10 << 10 | off11 << 11, 12)
+}
+//Don't appliable for C.LDSP, C.LQSP, C.FLDSP, C.SDSP, C.SQSP, C.FSDSP
+pub fn get_compressed_ci_imm(instruction: u16) -> u32 {
+    let off5: u32 = shift_and_trim16!(instruction, 12, 1);
+    let off7_6: u32 = shift_and_trim16!(instruction, 2, 2);
+    let off4_2: u32 = shift_and_trim16!(instruction, 4, 3);
+    off7_6 << 6 | off5 << 5 | off4_2 << 2
+}
+//Don't appliable for C.LDSP, C.LQSP, C.FLDSP, C.SDSP, C.SQSP, C.FSDSP
+pub fn get_compressed_css_imm(instruction: u16) -> u32 {
+    let off7_6: u32 = shift_and_trim16!(instruction, 6, 2);
+    let off5_2: u32 = shift_and_trim16!(instruction, 8, 4);
+    off5_2 << 2 | off7_6 << 6
+}
 pub fn encode_r_type(opcode: u8, rd: u8, funct3: u8, rs1: u8, rs2: u8, funct7: u8) -> u32 {
     let opcode = opcode as u32;
     let rd = (rd as u32) << 7;
@@ -282,8 +325,7 @@ fn parse_format_u(word: u32) -> FormatU {
 #[cfg(test)]
 mod tests {
     use crate::ops_decode::{
-        get_funct3, get_funct7, get_imm_b_type, get_imm_i_type, get_imm_s_type, get_opcode, get_rd,
-        get_rs1, get_rs2,
+        get_compressed_cj_imm, get_funct3, get_funct7, get_imm_b_type, get_imm_i_type, get_imm_s_type, get_opcode, get_rd, get_rs1, get_rs2
     };
 
     use super::{
@@ -373,6 +415,44 @@ mod tests {
         let left = get_imm_b_type(n);
         let right = 0b1111_1111_1111_1111_1111_1010_1011_0100;
         assert_eq!(left, right)
+    }
+    #[test]
+    fn test_cj_imm() {
+        let n: u16 = 0b000_10000000000_00;
+        let left = get_compressed_cj_imm(n);
+        let right = 0b11111111111111111111100000000000;
+        assert_eq!(left, right);
+        let n: u16 = 0b000_01000000000_00;
+        let left = get_compressed_cj_imm(n);
+        let right = 0b10000;
+        assert_eq!(left, right);
+        let n: u16 = 0b000_00110000000_00;
+        let left = get_compressed_cj_imm(n);
+        let right = 0b1100000000;
+        assert_eq!(left, right);
+        let n: u16 = 0b000_00001000000_00;
+        let left = get_compressed_cj_imm(n);
+        let right = 0b10000000000;
+        assert_eq!(left, right);
+        let n: u16 = 0b000_00000100000_00;
+        let left = get_compressed_cj_imm(n);
+        let right = 0b1000000;
+        assert_eq!(left, right);
+        let n: u16 = 0b000_00000010000_00;
+        let left = get_compressed_cj_imm(n);
+        let right = 0b10000000;
+        assert_eq!(left, right);
+        let n: u16 = 0b000_00000001110_00;
+        let left = get_compressed_cj_imm(n);
+        let right = 0b1110;
+        assert_eq!(left, right);
+        let n: u16 = 0b000_00000000001_00;
+        let left = get_compressed_cj_imm(n);
+        let right = 0b100000;
+        assert_eq!(left, right);
+
+        //println!("0b{left:00$b}", 16);
+
     }
     #[test]
     fn test_i_encoding() {
