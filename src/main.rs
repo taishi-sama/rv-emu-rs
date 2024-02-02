@@ -5,11 +5,11 @@ use std::{
 
 pub mod cpu;
 pub mod elf_analyzer;
+pub mod emulator;
 pub mod mmu;
 pub mod ops_decode;
 pub mod traps;
 pub mod uart;
-pub mod emulator;
 //pub mod gdb;
 
 fn main() {
@@ -20,7 +20,7 @@ fn main() {
     let mut elf_file = File::open(path).unwrap();
     let mut elf_contents = vec![];
     elf_file.read_to_end(&mut elf_contents).unwrap();
-    
+
     let mut emu = emulator::Emulator::from_elf(elf_contents);
     let mut stdin = io::stdin();
     println!("Start executing...");
@@ -29,7 +29,6 @@ fn main() {
         "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4",
         "t5", "t6",
     ];
-
 
     let display = false;
     loop {
@@ -69,7 +68,7 @@ fn main() {
         //print!("{}", x as char)
         v.push(x)
     }
-    for i in v.chunks_exact(2){
+    for i in v.chunks_exact(2) {
         println!("Test {}: {}", i[1], i[0] as char)
     }
     println!();
@@ -77,7 +76,7 @@ fn main() {
 
 #[cfg(test)]
 mod test {
-    use std::{path::Path, fs::File, io::Read};
+    use std::{fs::File, io::Read, path::Path};
 
     use crate::emulator;
 
@@ -95,31 +94,37 @@ mod test {
         }
         let mut v = vec![];
         while let Some(x) = emu.cpu.mmu.uart.try_get_byte() {
-        //print!("{}", x as char)
+            //print!("{}", x as char)
             v.push(x)
         }
-        for i in v.chunks_exact(2){
-            assert_eq!(i[0], b'y', "Test {} failed in {}", i[1], path.to_str().unwrap())
+        for i in v.chunks_exact(2) {
+            assert_eq!(
+                i[0],
+                b'y',
+                "Test {} failed in {}",
+                i[1],
+                path.to_str().unwrap()
+            )
             //println!("Test {}: {}", i[1], i[0] as char)
         }
     }
     #[test]
-    pub fn test_add(){
+    pub fn test_add() {
         let path = "./test_asm/target/testadd.s.elf";
         run_arch_tests(Path::new(path));
     }
     #[test]
-    pub fn test_addi(){
+    pub fn test_addi() {
         let path = "./test_asm/target/testaddi.s.elf";
         run_arch_tests(Path::new(path));
     }
     #[test]
-    pub fn test_sll(){
+    pub fn test_sll() {
         let path = "./test_asm/target/testsll.s.elf";
         run_arch_tests(Path::new(path));
     }
     #[test]
-    pub fn test_bltu(){
+    pub fn test_bltu() {
         let path = "./test_asm/target/testbltu.s.elf";
         run_arch_tests(Path::new(path));
     }

@@ -14,7 +14,7 @@ pub enum PrivilegeMode {
     Machine = 0,
     Supervisor = 1,
     Reserved = 2,
-    User = 3
+    User = 3,
 }
 
 // RV32IMA
@@ -26,7 +26,6 @@ pub struct CPU {
 
     //CSRs
     //pub CSRs: [u32; 4096],
-
     pub mstatus: u32,
     pub mstatush: u32,
     pub cyclel: u32,
@@ -46,19 +45,16 @@ pub struct CPU {
     pub mcause: u32,
     pub privilege: PrivilegeMode,
     pub wfi: bool,
-    pub reservation_slot : Option<u32>,
-    pub stopflag : Option<Arc<AtomicBool>>
-    
+    pub reservation_slot: Option<u32>,
+    pub stopflag: Option<Arc<AtomicBool>>,
 }
-
-
 
 #[allow(dead_code)]
 #[allow(unused_variables)]
 impl CPU {
     pub fn new(mmu: MMU) -> Self {
         let mut x = [0; 32];
-        x[2] = RAM_ADDRESS_END - 0x4;// - 0x4000;
+        x[2] = RAM_ADDRESS_END - 0x4; // - 0x4000;
         CPU {
             x,
             pc: 0,
@@ -81,7 +77,7 @@ impl CPU {
             privilege: PrivilegeMode::Machine,
             wfi: false,
             reservation_slot: None,
-            stopflag: None
+            stopflag: None,
         }
     }
     pub fn get_registers(&self) -> [u32; 32] {
@@ -101,11 +97,11 @@ impl CPU {
     fn get_x(&self, x: u8) -> u32 {
         self.x[x as usize]
     }
-    pub fn run_debugger(&mut self) {}
+    //pub fn run_debugger(&mut self) {}
     pub fn step(&mut self) -> Result<u32, Trap> {
         let instr = self.fetch()?;
-        self.execute(instr)?;
-        self.pc += 4;
+
+        self.pc += self.execute(instr)? as u32;
         Ok(instr)
     }
     pub fn process_trap(&mut self, trap: Trap) {
@@ -136,206 +132,218 @@ impl CPU {
         }
     }
 
-    
-
     fn fetch(&mut self) -> Result<u32, Trap> {
         self.mmu.fetch_word(self.pc)
     }
-    fn execute(&mut self, instr: u32) -> Result<(), Trap> {
+    fn execute(&mut self, instr: u32) -> Result<u8, Trap> {
         let opcode = get_opcode(instr);
-        match opcode {
-            0b0110111 => self.lui(instr),
-            0b0010111 => self.auipc(instr),
-            0b1101111 => self.jal(instr),
-            0b1100111 => match get_funct3(instr) {
-                0 => self.jalr(instr),
-                _ => Err(Trap {
-                    trap_type: crate::traps::TrapType::IllegalInstruction,
-                    value: instr,
-                }),
-            },
-            0b1100011 => match get_funct3(instr) {
-                0b000 => self.beq(instr),
-                0b001 => self.bne(instr),
-                0b100 => self.blt(instr),
-                0b101 => self.bge(instr),
-                0b110 => self.bltu(instr),
-                0b111 => self.bgeu(instr),
-                _ => Err(Trap {
-                    trap_type: crate::traps::TrapType::IllegalInstruction,
-                    value: instr,
-                }),
-            },
-            0b0000011 => match get_funct3(instr) {
-                0b000 => self.lb(instr),
-                0b001 => self.lh(instr),
-                0b010 => self.lw(instr),
-                0b100 => self.lbu(instr),
-                0b101 => self.lhu(instr),
-                _ => Err(Trap {
-                    trap_type: crate::traps::TrapType::IllegalInstruction,
-                    value: instr,
-                }),
-            },
-            0b0100011 => match get_funct3(instr) {
-                0b000 => self.sb(instr),
-                0b001 => self.sh(instr),
-                0b010 => self.sw(instr),
-                _ => Err(Trap {
-                    trap_type: crate::traps::TrapType::IllegalInstruction,
-                    value: instr,
-                }),
-            },
-            0b0010011 => match get_funct3(instr) {
-                0b000 => self.addi(instr),
-                0b010 => self.slti(instr),
-                0b011 => self.sltiu(instr),
-                0b100 => self.xori(instr),
-                0b110 => self.ori(instr),
-                0b111 => self.andi(instr),
-                0b001 => match get_funct7(instr) {
-                    0 => self.slli(instr),
+        let micro_opcode = opcode & 0b11;
+        if micro_opcode == 0b11 {
+            //Обработка обычных инструкций
+            match opcode {
+                0b0110111 => self.lui(instr),
+                0b0010111 => self.auipc(instr),
+                0b1101111 => self.jal(instr),
+                0b1100111 => match get_funct3(instr) {
+                    0 => self.jalr(instr),
                     _ => Err(Trap {
                         trap_type: crate::traps::TrapType::IllegalInstruction,
                         value: instr,
                     }),
                 },
-                0b101 => match get_funct7(instr) {
-                    0 => self.srli(instr),
-                    0b0100000 => self.srai(instr),
+                0b1100011 => match get_funct3(instr) {
+                    0b000 => self.beq(instr),
+                    0b001 => self.bne(instr),
+                    0b100 => self.blt(instr),
+                    0b101 => self.bge(instr),
+                    0b110 => self.bltu(instr),
+                    0b111 => self.bgeu(instr),
                     _ => Err(Trap {
                         trap_type: crate::traps::TrapType::IllegalInstruction,
                         value: instr,
                     }),
                 },
+                0b0000011 => match get_funct3(instr) {
+                    0b000 => self.lb(instr),
+                    0b001 => self.lh(instr),
+                    0b010 => self.lw(instr),
+                    0b100 => self.lbu(instr),
+                    0b101 => self.lhu(instr),
+                    _ => Err(Trap {
+                        trap_type: crate::traps::TrapType::IllegalInstruction,
+                        value: instr,
+                    }),
+                },
+                0b0100011 => match get_funct3(instr) {
+                    0b000 => self.sb(instr),
+                    0b001 => self.sh(instr),
+                    0b010 => self.sw(instr),
+                    _ => Err(Trap {
+                        trap_type: crate::traps::TrapType::IllegalInstruction,
+                        value: instr,
+                    }),
+                },
+                0b0010011 => match get_funct3(instr) {
+                    0b000 => self.addi(instr),
+                    0b010 => self.slti(instr),
+                    0b011 => self.sltiu(instr),
+                    0b100 => self.xori(instr),
+                    0b110 => self.ori(instr),
+                    0b111 => self.andi(instr),
+                    0b001 => match get_funct7(instr) {
+                        0 => self.slli(instr),
+                        _ => Err(Trap {
+                            trap_type: crate::traps::TrapType::IllegalInstruction,
+                            value: instr,
+                        }),
+                    },
+                    0b101 => match get_funct7(instr) {
+                        0 => self.srli(instr),
+                        0b0100000 => self.srai(instr),
+                        _ => Err(Trap {
+                            trap_type: crate::traps::TrapType::IllegalInstruction,
+                            value: instr,
+                        }),
+                    },
+                    _ => unreachable!(),
+                },
+                0b0110011 => match get_funct3(instr) {
+                    0b000 => match get_funct7(instr) {
+                        0 => self.add(instr),
+                        1 => self.mul(instr),
+                        0b0100000 => self.sub(instr),
+                        _ => Err(Trap {
+                            trap_type: crate::traps::TrapType::IllegalInstruction,
+                            value: instr,
+                        }),
+                    },
+                    0b001 => match get_funct7(instr) {
+                        0 => self.sll(instr),
+                        1 => self.mulh(instr),
+                        _ => Err(Trap {
+                            trap_type: crate::traps::TrapType::IllegalInstruction,
+                            value: instr,
+                        }),
+                    },
+                    0b010 => match get_funct7(instr) {
+                        0 => self.slt(instr),
+                        1 => self.mulhsu(instr),
+                        _ => Err(Trap {
+                            trap_type: crate::traps::TrapType::IllegalInstruction,
+                            value: instr,
+                        }),
+                    },
+                    0b011 => match get_funct7(instr) {
+                        0 => self.sltu(instr),
+                        1 => self.mulhu(instr),
+                        _ => Err(Trap {
+                            trap_type: crate::traps::TrapType::IllegalInstruction,
+                            value: instr,
+                        }),
+                    },
+                    0b100 => match get_funct7(instr) {
+                        0 => self.xor(instr),
+                        1 => self.div(instr),
+                        _ => Err(Trap {
+                            trap_type: crate::traps::TrapType::IllegalInstruction,
+                            value: instr,
+                        }),
+                    },
+                    0b101 => match get_funct7(instr) {
+                        0 => self.srl(instr),
+                        1 => self.divu(instr),
+                        0b0100000 => self.sra(instr),
+                        _ => Err(Trap {
+                            trap_type: crate::traps::TrapType::IllegalInstruction,
+                            value: instr,
+                        }),
+                    },
+                    0b110 => match get_funct7(instr) {
+                        0 => self.or(instr),
+                        1 => self.rem(instr),
+                        _ => Err(Trap {
+                            trap_type: crate::traps::TrapType::IllegalInstruction,
+                            value: instr,
+                        }),
+                    },
+                    0b111 => match get_funct7(instr) {
+                        0 => self.and(instr),
+                        1 => self.rem(instr),
+                        _ => Err(Trap {
+                            trap_type: crate::traps::TrapType::IllegalInstruction,
+                            value: instr,
+                        }),
+                    },
+                    _ => unreachable!(),
+                },
+                0b0001111 => match get_funct3(instr) {
+                    0b000 => self.fence(instr),
+                    0b001 => self.fence_i(instr),
+                    _ => Err(Trap {
+                        trap_type: crate::traps::TrapType::IllegalInstruction,
+                        value: instr,
+                    }),
+                },
+                0b1110011 => match get_funct3(instr) {
+                    0b000 => match get_imm_i_type(instr) {
+                        0 => self.ecall(instr),
+                        1 => self.ebreak(instr),
+                        _ => Err(Trap {
+                            trap_type: crate::traps::TrapType::IllegalInstruction,
+                            value: instr,
+                        }),
+                    },
+                    0b001 => self.csrrw(instr),
+                    0b010 => self.csrrs(instr),
+                    0b011 => self.csrrc(instr),
+                    0b101 => self.csrrwi(instr),
+                    0b110 => self.csrrsi(instr),
+                    0b111 => self.csrrci(instr),
+                    _ => Err(Trap {
+                        trap_type: crate::traps::TrapType::IllegalInstruction,
+                        value: instr,
+                    }),
+                },
+                0b0101111 => match get_funct3(instr) {
+                    0b010 => match get_rs3(instr) {
+                        0b00010 => self.lr_w(instr),
+                        0b00011 => self.sc_w(instr),
+                        0b00001 => self.amoswap_w(instr),
+                        0b00000 => self.amoadd_w(instr),
+                        0b00100 => self.amoxor_w(instr),
+                        0b01100 => self.amoand_w(instr),
+                        0b01000 => self.amoor_w(instr),
+                        0b10000 => self.amomin_w(instr),
+                        0b10100 => self.amomax_w(instr),
+                        0b11000 => self.amominu_w(instr),
+                        0b11100 => self.amomaxu_w(instr),
+                        _ => Err(Trap {
+                            trap_type: crate::traps::TrapType::IllegalInstruction,
+                            value: instr,
+                        }),
+                    },
+                    _ => Err(Trap {
+                        trap_type: crate::traps::TrapType::IllegalInstruction,
+                        value: instr,
+                    }),
+                },
+                _ => Err(Trap {
+                    trap_type: crate::traps::TrapType::IllegalInstruction,
+                    value: instr,
+                }),
+            }
+            .map(|_| 4)
+        } else {
+            let compressed = instr as u16;
+            match micro_opcode {
+                0b00 => todo!(),
+                0b01 => todo!(),
+                0b10 => todo!(),
                 _ => unreachable!(),
-            },
-            0b0110011 => match get_funct3(instr) {
-                0b000 => match get_funct7(instr) {
-                    0 => self.add(instr),
-                    1 => self.mul(instr),
-                    0b0100000 => self.sub(instr),
-                    _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
-                    }),
-                },
-                0b001 => match get_funct7(instr) {
-                    0 => self.sll(instr),
-                    1 => self.mulh(instr),
-                    _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
-                    }),
-                },
-                0b010 => match get_funct7(instr) {
-                    0 => self.slt(instr),
-                    1 => self.mulhsu(instr),
-                    _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
-                    }),
-                },
-                0b011 => match get_funct7(instr) {
-                    0 => self.sltu(instr),
-                    1 => self.mulhu(instr),
-                    _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
-                    }),
-                },
-                0b100 => match get_funct7(instr) {
-                    0 => self.xor(instr),
-                    1 => self.div(instr),
-                    _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
-                    }),
-                },
-                0b101 => match get_funct7(instr) {
-                    0 => self.srl(instr),
-                    1 => self.divu(instr),
-                    0b0100000 => self.sra(instr),
-                    _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
-                    }),
-                },
-                0b110 => match get_funct7(instr) {
-                    0 => self.or(instr),
-                    1 => self.rem(instr),
-                    _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
-                    }),
-                },
-                0b111 => match get_funct7(instr) {
-                    0 => self.and(instr),
-                    1 => self.rem(instr),
-                    _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
-                    }),
-                },
-                _ => unreachable!(),
-            },
-            0b0001111 => match get_funct3(instr) {
-                0b000 => self.fence(instr),
-                0b001 => self.fence_i(instr),
-                _ => Err(Trap {
-                    trap_type: crate::traps::TrapType::IllegalInstruction,
-                    value: instr,
-                }),
-            },
-            0b1110011 => match get_funct3(instr) {
-                0b000 => match get_imm_i_type(instr) {
-                    0 => self.ecall(instr),
-                    1 => self.ebreak(instr),
-                    _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
-                    }),
-                },
-                0b001 => self.csrrw(instr),
-                0b010 => self.csrrs(instr),
-                0b011 => self.csrrc(instr),
-                0b101 => self.csrrwi(instr),
-                0b110 => self.csrrsi(instr),
-                0b111 => self.csrrci(instr),
-                _ => Err(Trap {
-                    trap_type: crate::traps::TrapType::IllegalInstruction,
-                    value: instr,
-                }),
-            },
-            0b0101111 => match get_funct3(instr) {
-                0b010 => match get_rs3(instr) {
-                    0b00010 => self.lr_w(instr),
-                    0b00011 => self.sc_w(instr),
-                    0b00001 => self.amoswap_w(instr),
-                    0b00000 => self.amoadd_w(instr),
-                    0b00100 => self.amoxor_w(instr),
-                    0b01100 => self.amoand_w(instr),
-                    0b01000 => self.amoor_w(instr),
-                    0b10000 => self.amomin_w(instr),
-                    0b10100 => self.amomax_w(instr),
-                    0b11000 => self.amominu_w(instr),
-                    0b11100 => self.amomaxu_w(instr),
-                    _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
-                    }),
-                },
-                _ => Err(Trap {
-                    trap_type: crate::traps::TrapType::IllegalInstruction,
-                    value: instr,
-                }),
-            },
-            _ => Err(Trap {
-                trap_type: crate::traps::TrapType::IllegalInstruction,
-                value: instr,
-            }),
+            }
         }
     }
+
     fn lui(&mut self, instr: u32) -> Result<(), Trap> {
         let rd = get_rd(instr);
         let imm = get_imm_u_type(instr);
@@ -352,32 +360,32 @@ impl CPU {
         let rd = get_rd(instr);
         let imm = get_imm_j_type(instr);
         let t = self.pc.wrapping_add(imm);
-        if t & 0b11 == 0 {
-            self.set_x(rd, self.pc.wrapping_add(4));
-            self.pc = t.wrapping_sub(4);
-            Ok(())
-        } else {
-            Err(Trap {
-                trap_type: crate::traps::TrapType::InstructionAddressMisaligned,
-                value: self.pc,
-            })
-        }
+        //if t & 0b11 == 0 {
+        self.set_x(rd, self.pc.wrapping_add(4));
+        self.pc = t.wrapping_sub(4);
+        Ok(())
+        //} else {
+        //    Err(Trap {
+        //        trap_type: crate::traps::TrapType::InstructionAddressMisaligned,
+        //        value: self.pc,
+        //    })
+        //}
     }
     fn jalr(&mut self, instr: u32) -> Result<(), Trap> {
         let rd = get_rd(instr);
         let rs1 = get_rs1(instr);
         let imm = get_imm_i_type(instr);
         let t = (self.get_x(rs1).wrapping_add(imm)) & !1;
-        if t & 0b11 == 0 {
-            self.set_x(rd, self.pc + 4);
-            self.pc = t.wrapping_sub(4);
-            Ok(())
-        } else {
-            Err(Trap {
-                trap_type: crate::traps::TrapType::InstructionAddressMisaligned,
-                value: self.pc,
-            })
-        }
+        //if t & 0b11 == 0 {
+        self.set_x(rd, self.pc + 4);
+        self.pc = t.wrapping_sub(4);
+        Ok(())
+        //} else {
+        //    Err(Trap {
+        //        trap_type: crate::traps::TrapType::InstructionAddressMisaligned,
+        //        value: self.pc,
+        //    })
+        //}
     }
     fn beq(&mut self, instr: u32) -> Result<(), Trap> {
         let rs1 = get_rs1(instr);
@@ -670,58 +678,66 @@ impl CPU {
         let exception_type = TrapType::EnvironmentCallFromMMode; //TODO: Expand when adding privileges
         return Err(Trap {
             trap_type: exception_type,
-            value: self.pc
+            value: self.pc,
         });
     }
     fn ebreak(&mut self, instr: u32) -> Result<(), Trap> {
         let exception_type = TrapType::Breakpoint;
         return Err(Trap {
             trap_type: exception_type,
-            value: self.pc
+            value: self.pc,
         });
     }
 
     fn get_csr(&self, csr: u16) -> Result<u32, Trap> {
         //TODO: privileges check
         Ok(match csr {
-            0x340 =>  self.mscratch,
-			0x305 =>  self.mtvec,
-			0x304 =>  self.mie,
-			0xC00 =>  self.cyclel,
-            0xC80 =>  self.cycleh,
-			0x344 =>  self.mip,
-			0x341 =>  self.mepc,
-			0x300 =>  self.mstatus, //mstatus
-			0x342 =>  self.mcause,
-			0x343 =>  self.mtval,
-            0xf11 =>  0xff0ff0ff, //vendorId
-			0xf12 =>  0x0,      //marchid
-            0xf13 =>  0x0,      //mimpid
-            0xf14 =>  0x0,      //mhartid
-            0xf15 =>  0x0,      //mconfigptr
-            0x301 =>  0b01_0_10000_00000000_00010001_00000001, //misa, XLEN=32, IMA+X
-            
-            _ => todo!("CSR {csr:0x} not implemented")
+            0x340 => self.mscratch,
+            0x305 => self.mtvec,
+            0x304 => self.mie,
+            0xC00 => self.cyclel,
+            0xC80 => self.cycleh,
+            0x344 => self.mip,
+            0x341 => self.mepc,
+            0x300 => self.mstatus, //mstatus
+            0x342 => self.mcause,
+            0x343 => self.mtval,
+            0xf11 => 0xff0ff0ff,                              //vendorId
+            0xf12 => 0x0,                                     //marchid
+            0xf13 => 0x0,                                     //mimpid
+            0xf14 => 0x0,                                     //mhartid
+            0xf15 => 0x0,                                     //mconfigptr
+            0x301 => 0b01_0_10000_00000000_00010001_00000001, //misa, XLEN=32, IMA+X
+
+            _ => todo!("CSR {csr:0x} not implemented"),
         })
     }
-    //Is register writable 
+    //Is register writable
     fn set_csr(&mut self, csr: u16, new_val: u32) -> Result<bool, Trap> {
         //TODO: privileges check
         match csr {
-            0x340 =>  self.mscratch = new_val,
-			0x305 =>  self.mtvec = new_val,
-			0x304 =>  self.mie = new_val,
-			0xC00 =>  {return Ok(false);}, //cyclel
-            0xC80 =>  {return Ok(false);}, //cycleh
-			0x344 =>  self.mip = new_val,
-			0x341 =>  self.mepc = new_val,
-			0x300 =>  self.mstatus = new_val, //mstatus
-            0x310 =>  self.mstatush = new_val,
-			0x342 =>  self.mcause = new_val,
-			0x343 =>  self.mtval = new_val,
-            0xf11..=0xf15 =>  {return Ok(false);}, //vendorId
-			0x301 =>  {return Ok(false);}, //misa, XLEN=32, IMA+X
-            _ => todo!("CSR 0x{csr:0x} not implemented")
+            0x340 => self.mscratch = new_val,
+            0x305 => self.mtvec = new_val,
+            0x304 => self.mie = new_val,
+            0xC00 => {
+                return Ok(false);
+            } //cyclel
+            0xC80 => {
+                return Ok(false);
+            } //cycleh
+            0x344 => self.mip = new_val,
+            0x341 => self.mepc = new_val,
+            0x300 => self.mstatus = new_val, //mstatus
+            0x310 => self.mstatush = new_val,
+            0x342 => self.mcause = new_val,
+            0x343 => self.mtval = new_val,
+            0xf11..=0xf15 => {
+                return Ok(false);
+            } //vendorId
+            0x301 => {
+                return Ok(false);
+            } //misa, XLEN=32, IMA+X
+            _ => todo!("CSR 0x{csr:0x} not implemented"),
         };
         Ok(true)
     }

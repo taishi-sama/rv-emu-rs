@@ -53,7 +53,10 @@ pub fn get_imm_i_type(instruction: u32) -> u32 {
 #[inline]
 pub fn get_imm_s_type(instruction: u32) -> u32 {
     //TODO do faster
-    sign_extend32((get_funct7(instruction) as u32) << 5 | get_rd(instruction) as u32, 12)
+    sign_extend32(
+        (get_funct7(instruction) as u32) << 5 | get_rd(instruction) as u32,
+        12,
+    )
 }
 #[inline]
 pub fn get_imm_b_type(instruction: u32) -> u32 {
@@ -70,7 +73,6 @@ pub fn get_imm_b_type(instruction: u32) -> u32 {
     let t = sign_extend32(i_7 | i_11_8 | i_30_25 | i_31, 13);
     //println!("{t:00$b}", 32);
     t
-
 }
 #[inline]
 pub fn get_imm_u_type(instruction: u32) -> u32 {
@@ -83,7 +85,6 @@ pub fn get_csr_num(instruction: u32) -> u16 {
     (instruction >> 12) as u16
 }
 
-
 #[inline]
 pub fn get_imm_j_type(instruction: u32) -> u32 {
     let i_24_21: u32 = from_to_get(instruction, 21, 24, 1);
@@ -93,6 +94,15 @@ pub fn get_imm_j_type(instruction: u32) -> u32 {
     let i_31: u32 = from_to_get(instruction, 31, 31, 20);
     sign_extend32(i_24_21 | i_30_25 | i_20 | i_19_12 | i_31, 21)
 }
+
+pub fn get_compressed_func3(instruction: u16) -> u16 {
+    instruction >> 13
+}
+pub fn get_compressed_func4(instruction: u16) -> u16 {
+    instruction >> 12
+}
+
+
 
 pub fn encode_r_type(opcode: u8, rd: u8, funct3: u8, rs1: u8, rs2: u8, funct7: u8) -> u32 {
     let opcode = opcode as u32;
@@ -118,165 +128,156 @@ pub fn encode_u_type(opcode: u8, rd: u8, imm: i32) -> u32 {
     opcode | rd | imm
 }
 
-
-
 struct FormatB {
-	rs1: u8,
-	rs2: u8,
-	imm: u32
+    rs1: u8,
+    rs2: u8,
+    imm: u32,
 }
 
 fn parse_format_b(word: u32) -> FormatB {
-	FormatB {
-		rs1: ((word >> 15) & 0x1f) as u8, // [19:15]
-		rs2: ((word >> 20) & 0x1f) as u8, // [24:20]
-		imm: (
-			match word & 0x80000000 { // imm[31:12] = [31]
+    FormatB {
+        rs1: ((word >> 15) & 0x1f) as u8, // [19:15]
+        rs2: ((word >> 20) & 0x1f) as u8, // [24:20]
+        imm: (
+            match word & 0x80000000 { // imm[31:12] = [31]
 				0x80000000 => 0xfffff000,
 				_ => 0
 			} |
 			((word << 4) & 0x00000800) | // imm[11] = [7]
 			((word >> 20) & 0x000007e0) | // imm[10:5] = [30:25]
-			((word >> 7) & 0x0000001e) // imm[4:1] = [11:8]
-		) as i32 as i64 as u32
-	}
+			((word >> 7) & 0x0000001e)
+            // imm[4:1] = [11:8]
+        ) as i32 as i64 as u32,
+    }
 }
 
-
 struct FormatCSR {
-	csr: u16,
-	rs: u8,
-	rd: u8
+    csr: u16,
+    rs: u8,
+    rd: u8,
 }
 
 fn parse_format_csr(word: u32) -> FormatCSR {
-	FormatCSR {
-		csr: ((word >> 20) & 0xfff) as u16, // [31:20]
-		rs: ((word >> 15) & 0x1f) as u8, // [19:15], also uimm
-		rd: ((word >> 7) & 0x1f) as u8 // [11:7]
-	}
+    FormatCSR {
+        csr: ((word >> 20) & 0xfff) as u16, // [31:20]
+        rs: ((word >> 15) & 0x1f) as u8,    // [19:15], also uimm
+        rd: ((word >> 7) & 0x1f) as u8,     // [11:7]
+    }
 }
 
 struct FormatI {
-	rd: u8,
-	rs1: u8,
-	imm: u32
+    rd: u8,
+    rs1: u8,
+    imm: u32,
 }
 
 fn parse_format_i(word: u32) -> FormatI {
-	FormatI {
-		rd: ((word >> 7) & 0x1f) as u8, // [11:7]
-		rs1: ((word >> 15) & 0x1f) as u8, // [19:15]
-		imm: (
-			match word & 0x80000000 { // imm[31:11] = [31]
-				0x80000000 => 0xfffff800,
-				_ => 0
-			} |
-			((word >> 20) & 0x000007ff) // imm[10:0] = [30:20]
-		) as i32 as i64 as u32
-	}
+    FormatI {
+        rd: ((word >> 7) & 0x1f) as u8,   // [11:7]
+        rs1: ((word >> 15) & 0x1f) as u8, // [19:15]
+        imm: (
+            match word & 0x80000000 {
+                // imm[31:11] = [31]
+                0x80000000 => 0xfffff800,
+                _ => 0,
+            } | ((word >> 20) & 0x000007ff)
+            // imm[10:0] = [30:20]
+        ) as i32 as i64 as u32,
+    }
 }
 
-
-
 struct FormatJ {
-	rd: u8,
-	imm: u32
+    rd: u8,
+    imm: u32,
 }
 
 fn parse_format_j(word: u32) -> FormatJ {
-	FormatJ {
-		rd: ((word >> 7) & 0x1f) as u8, // [11:7]
-		imm: (
-			match word & 0x80000000 { // imm[31:20] = [31]
+    FormatJ {
+        rd: ((word >> 7) & 0x1f) as u8, // [11:7]
+        imm: (
+            match word & 0x80000000 { // imm[31:20] = [31]
 				0x80000000 => 0xfff00000,
 				_ => 0
 			} |
 			(word & 0x000ff000) | // imm[19:12] = [19:12]
 			((word & 0x00100000) >> 9) | // imm[11] = [20]
-			((word & 0x7fe00000) >> 20) // imm[10:1] = [30:21]
-		) as i32 as i64 as u32
-	}
+			((word & 0x7fe00000) >> 20)
+            // imm[10:1] = [30:21]
+        ) as i32 as i64 as u32,
+    }
 }
 
-
-
 struct FormatR {
-	rd: u8,
-	rs1: u8,
-	rs2: u8
+    rd: u8,
+    rs1: u8,
+    rs2: u8,
 }
 
 fn parse_format_r(word: u32) -> FormatR {
-	FormatR {
-		rd: ((word >> 7) & 0x1f) as u8, // [11:7]
-		rs1: ((word >> 15) & 0x1f) as u8, // [19:15]
-		rs2: ((word >> 20) & 0x1f) as u8 // [24:20]
-	}
+    FormatR {
+        rd: ((word >> 7) & 0x1f) as u8,   // [11:7]
+        rs1: ((word >> 15) & 0x1f) as u8, // [19:15]
+        rs2: ((word >> 20) & 0x1f) as u8, // [24:20]
+    }
 }
-
-
 
 // has rs3
 struct FormatR2 {
-	rd: u8,
-	rs1: u8,
-	rs2: u8,
-	rs3: u8
+    rd: u8,
+    rs1: u8,
+    rs2: u8,
+    rs3: u8,
 }
 
 fn parse_format_r2(word: u32) -> FormatR2 {
-	FormatR2 {
-		rd: ((word >> 7) & 0x1f) as u8, // [11:7]
-		rs1: ((word >> 15) & 0x1f) as u8, // [19:15]
-		rs2: ((word >> 20) & 0x1f) as u8, // [24:20]
-		rs3: ((word >> 27) & 0x1f) as u8 // [31:27]
-	}
+    FormatR2 {
+        rd: ((word >> 7) & 0x1f) as u8,   // [11:7]
+        rs1: ((word >> 15) & 0x1f) as u8, // [19:15]
+        rs2: ((word >> 20) & 0x1f) as u8, // [24:20]
+        rs3: ((word >> 27) & 0x1f) as u8, // [31:27]
+    }
 }
 
-
 struct FormatS {
-	rs1: u8,
-	rs2: u8,
-	imm: u32
+    rs1: u8,
+    rs2: u8,
+    imm: u32,
 }
 
 fn parse_format_s(word: u32) -> FormatS {
-	FormatS {
-		rs1: ((word >> 15) & 0x1f) as u8, // [19:15]
-		rs2: ((word >> 20) & 0x1f) as u8, // [24:20]
-		imm: (
-			match word & 0x80000000 {
+    FormatS {
+        rs1: ((word >> 15) & 0x1f) as u8, // [19:15]
+        rs2: ((word >> 20) & 0x1f) as u8, // [24:20]
+        imm: (
+            match word & 0x80000000 {
 				0x80000000 => 0xfffff000,
 				_ => 0
 			} | // imm[31:12] = [31]
 			((word >> 20) & 0xfe0) | // imm[11:5] = [31:25]
-			((word >> 7) & 0x1f) // imm[4:0] = [11:7]
-		) as i32 as i64 as u32
-	}
+			((word >> 7) & 0x1f)
+            // imm[4:0] = [11:7]
+        ) as i32 as i64 as u32,
+    }
 }
 
-
 struct FormatU {
-	rd: usize,
-	imm: u64
+    rd: usize,
+    imm: u64,
 }
 
 fn parse_format_u(word: u32) -> FormatU {
-	FormatU {
-		rd: ((word >> 7) & 0x1f) as usize, // [11:7]
-		imm: (
-			match word & 0x80000000 {
+    FormatU {
+        rd: ((word >> 7) & 0x1f) as usize, // [11:7]
+        imm: (
+            match word & 0x80000000 {
 				0x80000000 => 0xffffffff00000000,
 				_ => 0
 			} | // imm[63:32] = [31]
-			((word as u64) & 0xfffff000) // imm[31:12] = [31:12]
-		) as u64
-	}
+			((word as u64) & 0xfffff000)
+            // imm[31:12] = [31:12]
+        ) as u64,
+    }
 }
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -285,7 +286,10 @@ mod tests {
         get_rs1, get_rs2,
     };
 
-    use super::{encode_i_type, parse_format_b, parse_format_i, parse_format_s, get_imm_j_type, parse_format_j};
+    use super::{
+        encode_i_type, get_imm_j_type, parse_format_b, parse_format_i, parse_format_j,
+        parse_format_s,
+    };
     #[test]
     fn super_test_b() {
         for word in 0..=u32::MAX {
@@ -293,7 +297,7 @@ mod tests {
             let l = get_imm_b_type(word);
             if r.imm != l {
                 assert_eq!(l, r.imm);
-            } 
+            }
         }
     }
     #[test]
@@ -305,7 +309,7 @@ mod tests {
                 let imm = r.imm;
                 println!("{imm:00$b}", 32);
                 assert_eq!(l, r.imm);
-            } 
+            }
         }
     }
     #[test]
@@ -317,7 +321,7 @@ mod tests {
                 let imm = r.imm;
                 println!("{imm:00$b}", 32);
                 assert_eq!(l, r.imm);
-            } 
+            }
         }
     }
     #[test]
@@ -329,10 +333,9 @@ mod tests {
                 let imm = r.imm;
                 println!("{imm:00$b}", 32);
                 assert_eq!(l, r.imm);
-            } 
+            }
         }
     }
-
 
     #[test]
     fn test_r_type() {

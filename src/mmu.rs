@@ -26,12 +26,12 @@ impl Default for MMU {
 
 impl MMU {
     pub fn fetch_word(&self, address: u32) -> Result<u32, Trap> {
-        if address % 4 != 0 {
-            return Err(Trap {
-                trap_type: crate::traps::TrapType::InstructionAddressMisaligned,
-                value: address,
-            });
-        }
+        //if address % 2 != 0 {
+        //    return Err(Trap {
+        //        trap_type: crate::traps::TrapType::InstructionAddressMisaligned,
+        //        value: address,
+        //    });
+        //}
         match address {
             RAM_ADDRESS..=RAM_ADDRESS_END => {
                 let mem_adr = (address - RAM_ADDRESS) as usize;

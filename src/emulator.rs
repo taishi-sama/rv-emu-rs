@@ -1,12 +1,22 @@
-use std::{net::{TcpListener, TcpStream}, io};
+use std::{
+    io,
+    net::{TcpListener, TcpStream},
+};
 
-use gdbstub::{stub::{GdbStub, run_blocking::{BlockingEventLoop, Event, WaitForStopReasonError}, SingleThreadStopReason}, target::Target, conn::Connection, common::Signal};
+use gdbstub::{
+    common::Signal,
+    conn::Connection,
+    stub::{
+        run_blocking::{BlockingEventLoop, Event, WaitForStopReasonError},
+        GdbStub, SingleThreadStopReason,
+    },
+    target::Target,
+};
 
 use crate::{cpu::CPU, elf_analyzer::elf_setup_mmu};
 
 pub struct Emulator {
     pub cpu: CPU,
-
 }
 
 impl Emulator {
@@ -16,6 +26,5 @@ impl Emulator {
         let mut cpu = CPU::new(mm);
         cpu.pc = pc;
         Emulator { cpu }
-        
     }
 }

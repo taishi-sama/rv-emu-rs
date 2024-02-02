@@ -11,8 +11,10 @@ pub fn main() {
 
     let mut uart = UART::new();
     let my_str = include_str!("play.txt");
-    for i in my_str.split("SPLIT"){
+    for (i, s) in my_str.split("SPLIT").enumerate(){
         writeln!(uart, "{}", i).unwrap();
+        writeln!(uart, "{}", s).unwrap();
+
         for j in 0..6100000 {
             unsafe{
                 asm!("nop");
