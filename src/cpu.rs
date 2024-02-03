@@ -3,8 +3,7 @@ use std::sync::{atomic::AtomicBool, Arc};
 use crate::{
     mmu::{MMU, RAM_ADDRESS_END},
     ops_decode::{
-        get_funct3, get_funct7, get_imm_b_type, get_imm_i_type, get_imm_j_type, get_imm_s_type,
-        get_imm_u_type, get_opcode, get_rd, get_rs1, get_rs2, get_rs3,
+        get_compressed_func3, get_funct3, get_funct7, get_imm_b_type, get_imm_i_type, get_imm_j_type, get_imm_s_type, get_imm_u_type, get_opcode, get_rd, get_rs1, get_rs2, get_rs3
     },
     traps::{Trap, TrapType},
 };
@@ -336,9 +335,19 @@ impl CPU {
         } else {
             let compressed = instr as u16;
             match micro_opcode {
-                0b00 => todo!(),
-                0b01 => todo!(),
-                0b10 => todo!(),
+                0b00 => match get_compressed_func3(compressed) {
+                    0b000 => match compressed {
+                        0 => Err(Trap {
+                            trap_type: crate::traps::TrapType::IllegalInstruction,
+                            value: instr,
+                        }),
+                        _ => todo!()
+                    },
+                    _ => todo!()
+
+                },
+                0b01 => todo!("0b{compressed:00$b}| opcode {micro_opcode}", 16),
+                0b10 => todo!("0b{compressed:00$b}| opcode {micro_opcode}", 16),
                 _ => unreachable!(),
             }
         }
@@ -895,6 +904,87 @@ impl CPU {
         todo!()
     }
     fn wfi(&mut self, instr: u32) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_addi4spn(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_lw(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_sw(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_nop(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_addi(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_jal(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_li(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_addi16sp(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_lui(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_srli(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_srai(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_andi(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_sub(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_xor(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_or(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_and(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_j(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_beqz(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_bnez(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_slli(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_lwsp(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_jr(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_mv(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_ebreak(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_jalr(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_add(&mut self, instr: u16) -> Result<(), Trap> {
+        todo!()
+    }
+    fn c_swsp(&mut self, instr: u16) -> Result<(), Trap> {
         todo!()
     }
 }

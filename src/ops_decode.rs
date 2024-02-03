@@ -114,6 +114,15 @@ pub fn get_compressed_func3(instruction: u16) -> u16 {
 pub fn get_compressed_func4(instruction: u16) -> u16 {
     instruction >> 12
 }
+pub fn get_compressed_func6(instruction: u16) -> u16 {
+    instruction >> 10
+}
+pub fn get_compressed_func2(instruction: u16) -> u16 {
+    shift_and_trim16!(instruction, 10, 2)
+}
+pub fn get_compressed_func(instruction: u16) -> u16 {
+    shift_and_trim16!(instruction, 5, 2)
+}
 // rs1'
 pub fn get_compressed_rs1c(instruction: u16) -> u8 {
     shift_and_trim16!(instruction, 7, 3)
@@ -122,7 +131,13 @@ pub fn get_compressed_rs1c(instruction: u16) -> u8 {
 pub fn get_compressed_rdc(instruction: u16) -> u8 {
     shift_and_trim16!(instruction, 2, 3)
 }
-pub fn get_compressed_cj_imm(instruction: u16) -> u32 {
+pub fn get_compressed_rs2(instruction: u16) -> u8 {
+    shift_and_trim16!(instruction, 2, 5)
+}
+pub fn get_compressed_rd(instruction: u16) -> u8 {
+    shift_and_trim16!(instruction, 7, 5)
+}
+pub fn get_compressed_cj_jump_imm(instruction: u16) -> u32 {
     let raw_imm: u32 = shift_and_trim16!(instruction, 2, 11);
     let off5: u32 = shift_and_trim!(raw_imm, 0, 1);
     let off3_1: u32 = shift_and_trim!(raw_imm, 1, 3);
@@ -135,17 +150,73 @@ pub fn get_compressed_cj_imm(instruction: u16) -> u32 {
     sign_extend32(off3_1 << 1 | off4 << 4 | off5 << 5 | off6 << 6 | off7 << 7 | off9_8 << 8 | off10 << 10 | off11 << 11, 12)
 }
 //Don't appliable for C.LDSP, C.LQSP, C.FLDSP, C.SDSP, C.SQSP, C.FSDSP
-pub fn get_compressed_ci_imm(instruction: u16) -> u32 {
+pub fn get_compressed_ci_stack_load_32_imm(instruction: u16) -> u32 {
     let off5: u32 = shift_and_trim16!(instruction, 12, 1);
     let off7_6: u32 = shift_and_trim16!(instruction, 2, 2);
     let off4_2: u32 = shift_and_trim16!(instruction, 4, 3);
     off7_6 << 6 | off5 << 5 | off4_2 << 2
 }
 //Don't appliable for C.LDSP, C.LQSP, C.FLDSP, C.SDSP, C.SQSP, C.FSDSP
-pub fn get_compressed_css_imm(instruction: u16) -> u32 {
+pub fn get_compressed_css_stack_write_32_imm(instruction: u16) -> u32 {
     let off7_6: u32 = shift_and_trim16!(instruction, 6, 2);
     let off5_2: u32 = shift_and_trim16!(instruction, 8, 4);
     off5_2 << 2 | off7_6 << 6
+}
+pub fn get_compressed_cl_mem_load_32_imm(instruction: u16) -> u32 {
+    let off5_3: u32 = shift_and_trim16!(instruction, 10, 3);
+    let off6: u32 = shift_and_trim16!(instruction, 2, 2);
+    let off2: u32 = shift_and_trim16!(instruction, 4, 3);
+    off6 << 6 | off5_3 << 3 | off2 << 2
+}
+pub fn get_compressed_cs_mem_store_32_imm(instruction: u16) -> u32 {
+    let off5_3: u32 = shift_and_trim16!(instruction, 10, 3);
+    let off6: u32 = shift_and_trim16!(instruction, 2, 2);
+    let off2: u32 = shift_and_trim16!(instruction, 4, 3);
+    off6 << 6 | off5_3 << 3 | off2 << 2
+}
+pub fn get_compressed_cb_shift_imm(instruction: u16) -> u32 {
+    let shamt5: u32 = shift_and_trim16!(instruction, 12, 1);
+    let shamt4_0: u32 = shift_and_trim16!(instruction, 2, 5);
+    shamt5 << 5 | shamt4_0
+}
+pub fn get_compressed_cb_and_imm(instruction: u16) -> u32 {
+    let shamt5: u32 = shift_and_trim16!(instruction, 12, 1);
+    let shamt4_0: u32 = shift_and_trim16!(instruction, 2, 5);
+    sign_extend32(shamt5 << 5 | shamt4_0, 6)
+}
+pub fn get_compressed_cb_branch_imm(instruction: u16) -> u32 {
+    let off5: u32 = shift_and_trim16!(instruction, 2, 1);
+    let off2_1: u32 = shift_and_trim16!(instruction, 3, 2);
+    let off7_6: u32 = shift_and_trim16!(instruction, 5, 2);
+    let off4_3: u32 = shift_and_trim16!(instruction, 10, 2);
+    let off8: u32 = shift_and_trim16!(instruction, 12, 1);
+
+    sign_extend32(off8 << 8 | off7_6 << 6 | off5 << 5 | off4_3 << 3 | off2_1 << 1, 9)  
+}
+pub fn get_compressed_ci_addi16sp_imm(instruction: u16) -> u32 {
+    let nzimm9: u32 = shift_and_trim16!(instruction, 12, 1);
+    let nzimm5: u32 = shift_and_trim16!(instruction, 2, 1);
+    let nzimm8_7: u32 = shift_and_trim16!(instruction, 3, 2);
+    let nzimm6: u32 = shift_and_trim16!(instruction, 5, 1);
+    let nzimm4: u32 = shift_and_trim16!(instruction, 6, 1);
+    sign_extend32(nzimm4 << 4 | nzimm5 << 5 | nzimm6 << 6 | nzimm8_7 << 7 | nzimm9 << 9, 10)
+}
+pub fn get_compressed_ci_li_addi_imm(instruction: u16) -> u32 {
+    let imm5: u32 = shift_and_trim16!(instruction, 12, 1);
+    let imm4_0: u32 = shift_and_trim16!(instruction, 2, 5);
+    sign_extend32(imm5 << 5 | imm4_0, 6)
+}
+pub fn get_compressed_ci_lui_imm(instruction: u16) -> u32 {
+    let imm17: u32 = shift_and_trim16!(instruction, 12, 1);
+    let imm16_12: u32 = shift_and_trim16!(instruction, 2, 5);
+    sign_extend32(imm17 << 17 | imm16_12 << 12, 18)
+}
+pub fn get_compressed_ciw_addi4spn_imm(instruction: u16) -> u32 {
+    let nzimm3: u32 = shift_and_trim16!(instruction, 5, 1);
+    let nzimm2: u32 = shift_and_trim16!(instruction, 6, 1);
+    let nzimm9_6: u32 = shift_and_trim16!(instruction, 7, 4);
+    let nzimm5_4: u32 = shift_and_trim16!(instruction, 11, 2);
+    nzimm9_6 << 6 | nzimm5_4 << 4 | nzimm3 << 3 | nzimm2 << 2
 }
 pub fn encode_r_type(opcode: u8, rd: u8, funct3: u8, rs1: u8, rs2: u8, funct7: u8) -> u32 {
     let opcode = opcode as u32;
@@ -325,7 +396,7 @@ fn parse_format_u(word: u32) -> FormatU {
 #[cfg(test)]
 mod tests {
     use crate::ops_decode::{
-        get_compressed_cj_imm, get_funct3, get_funct7, get_imm_b_type, get_imm_i_type, get_imm_s_type, get_opcode, get_rd, get_rs1, get_rs2
+        get_compressed_cj_jump_imm, get_funct3, get_funct7, get_imm_b_type, get_imm_i_type, get_imm_s_type, get_opcode, get_rd, get_rs1, get_rs2
     };
 
     use super::{
@@ -419,35 +490,35 @@ mod tests {
     #[test]
     fn test_cj_imm() {
         let n: u16 = 0b000_10000000000_00;
-        let left = get_compressed_cj_imm(n);
+        let left = get_compressed_cj_jump_imm(n);
         let right = 0b11111111111111111111100000000000;
         assert_eq!(left, right);
         let n: u16 = 0b000_01000000000_00;
-        let left = get_compressed_cj_imm(n);
+        let left = get_compressed_cj_jump_imm(n);
         let right = 0b10000;
         assert_eq!(left, right);
         let n: u16 = 0b000_00110000000_00;
-        let left = get_compressed_cj_imm(n);
+        let left = get_compressed_cj_jump_imm(n);
         let right = 0b1100000000;
         assert_eq!(left, right);
         let n: u16 = 0b000_00001000000_00;
-        let left = get_compressed_cj_imm(n);
+        let left = get_compressed_cj_jump_imm(n);
         let right = 0b10000000000;
         assert_eq!(left, right);
         let n: u16 = 0b000_00000100000_00;
-        let left = get_compressed_cj_imm(n);
+        let left = get_compressed_cj_jump_imm(n);
         let right = 0b1000000;
         assert_eq!(left, right);
         let n: u16 = 0b000_00000010000_00;
-        let left = get_compressed_cj_imm(n);
+        let left = get_compressed_cj_jump_imm(n);
         let right = 0b10000000;
         assert_eq!(left, right);
         let n: u16 = 0b000_00000001110_00;
-        let left = get_compressed_cj_imm(n);
+        let left = get_compressed_cj_jump_imm(n);
         let right = 0b1110;
         assert_eq!(left, right);
         let n: u16 = 0b000_00000000001_00;
-        let left = get_compressed_cj_imm(n);
+        let left = get_compressed_cj_jump_imm(n);
         let right = 0b100000;
         assert_eq!(left, right);
 

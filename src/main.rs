@@ -14,7 +14,7 @@ pub mod uart;
 
 fn main() {
     //let mut m = mmu::MMU::default();
-    let path = "./bad_apple/target/riscv32i-unknown-none-elf/release/bad_apple";
+    let path = "./bad_apple/target/riscv32imac-unknown-none-elf/release/bad_apple";
     //let path = "./test_asm/target/testadd.s.elf";
     println!("Loading elf \"{}\"", path);
     let mut elf_file = File::open(path).unwrap();
