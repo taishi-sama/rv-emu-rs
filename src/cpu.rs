@@ -104,7 +104,8 @@ impl CPU {
         Ok(instr)
     }
     pub fn process_trap(&mut self, trap: Trap) {
-        match trap.trap_type {
+        
+        match trap.tcause {
             TrapType::InstructionAddressMisaligned => todo!(),
             TrapType::InstructionAccessFault => todo!(),
             TrapType::IllegalInstruction => todo!(),
@@ -146,8 +147,8 @@ impl CPU {
                 0b1100111 => match get_funct3(instr) {
                     0 => self.jalr(instr),
                     _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
+                        tcause: crate::traps::TrapType::IllegalInstruction,
+                        tval: instr,
                     }),
                 },
                 0b1100011 => match get_funct3(instr) {
@@ -158,8 +159,8 @@ impl CPU {
                     0b110 => self.bltu(instr),
                     0b111 => self.bgeu(instr),
                     _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
+                        tcause: crate::traps::TrapType::IllegalInstruction,
+                        tval: instr,
                     }),
                 },
                 0b0000011 => match get_funct3(instr) {
@@ -169,8 +170,8 @@ impl CPU {
                     0b100 => self.lbu(instr),
                     0b101 => self.lhu(instr),
                     _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
+                        tcause: crate::traps::TrapType::IllegalInstruction,
+                        tval: instr,
                     }),
                 },
                 0b0100011 => match get_funct3(instr) {
@@ -178,8 +179,8 @@ impl CPU {
                     0b001 => self.sh(instr),
                     0b010 => self.sw(instr),
                     _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
+                        tcause: crate::traps::TrapType::IllegalInstruction,
+                        tval: instr,
                     }),
                 },
                 0b0010011 => match get_funct3(instr) {
@@ -192,16 +193,16 @@ impl CPU {
                     0b001 => match get_funct7(instr) {
                         0 => self.slli(instr),
                         _ => Err(Trap {
-                            trap_type: crate::traps::TrapType::IllegalInstruction,
-                            value: instr,
+                            tcause: crate::traps::TrapType::IllegalInstruction,
+                            tval: instr,
                         }),
                     },
                     0b101 => match get_funct7(instr) {
                         0 => self.srli(instr),
                         0b0100000 => self.srai(instr),
                         _ => Err(Trap {
-                            trap_type: crate::traps::TrapType::IllegalInstruction,
-                            value: instr,
+                            tcause: crate::traps::TrapType::IllegalInstruction,
+                            tval: instr,
                         }),
                     },
                     _ => unreachable!(),
@@ -212,40 +213,40 @@ impl CPU {
                         1 => self.mul(instr),
                         0b0100000 => self.sub(instr),
                         _ => Err(Trap {
-                            trap_type: crate::traps::TrapType::IllegalInstruction,
-                            value: instr,
+                            tcause: crate::traps::TrapType::IllegalInstruction,
+                            tval: instr,
                         }),
                     },
                     0b001 => match get_funct7(instr) {
                         0 => self.sll(instr),
                         1 => self.mulh(instr),
                         _ => Err(Trap {
-                            trap_type: crate::traps::TrapType::IllegalInstruction,
-                            value: instr,
+                            tcause: crate::traps::TrapType::IllegalInstruction,
+                            tval: instr,
                         }),
                     },
                     0b010 => match get_funct7(instr) {
                         0 => self.slt(instr),
                         1 => self.mulhsu(instr),
                         _ => Err(Trap {
-                            trap_type: crate::traps::TrapType::IllegalInstruction,
-                            value: instr,
+                            tcause: crate::traps::TrapType::IllegalInstruction,
+                            tval: instr,
                         }),
                     },
                     0b011 => match get_funct7(instr) {
                         0 => self.sltu(instr),
                         1 => self.mulhu(instr),
                         _ => Err(Trap {
-                            trap_type: crate::traps::TrapType::IllegalInstruction,
-                            value: instr,
+                            tcause: crate::traps::TrapType::IllegalInstruction,
+                            tval: instr,
                         }),
                     },
                     0b100 => match get_funct7(instr) {
                         0 => self.xor(instr),
                         1 => self.div(instr),
                         _ => Err(Trap {
-                            trap_type: crate::traps::TrapType::IllegalInstruction,
-                            value: instr,
+                            tcause: crate::traps::TrapType::IllegalInstruction,
+                            tval: instr,
                         }),
                     },
                     0b101 => match get_funct7(instr) {
@@ -253,24 +254,24 @@ impl CPU {
                         1 => self.divu(instr),
                         0b0100000 => self.sra(instr),
                         _ => Err(Trap {
-                            trap_type: crate::traps::TrapType::IllegalInstruction,
-                            value: instr,
+                            tcause: crate::traps::TrapType::IllegalInstruction,
+                            tval: instr,
                         }),
                     },
                     0b110 => match get_funct7(instr) {
                         0 => self.or(instr),
                         1 => self.rem(instr),
                         _ => Err(Trap {
-                            trap_type: crate::traps::TrapType::IllegalInstruction,
-                            value: instr,
+                            tcause: crate::traps::TrapType::IllegalInstruction,
+                            tval: instr,
                         }),
                     },
                     0b111 => match get_funct7(instr) {
                         0 => self.and(instr),
                         1 => self.rem(instr),
                         _ => Err(Trap {
-                            trap_type: crate::traps::TrapType::IllegalInstruction,
-                            value: instr,
+                            tcause: crate::traps::TrapType::IllegalInstruction,
+                            tval: instr,
                         }),
                     },
                     _ => unreachable!(),
@@ -279,8 +280,8 @@ impl CPU {
                     0b000 => self.fence(instr),
                     0b001 => self.fence_i(instr),
                     _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
+                        tcause: crate::traps::TrapType::IllegalInstruction,
+                        tval: instr,
                     }),
                 },
                 0b1110011 => match get_funct3(instr) {
@@ -288,8 +289,8 @@ impl CPU {
                         0 => self.ecall(instr),
                         1 => self.ebreak(instr),
                         _ => Err(Trap {
-                            trap_type: crate::traps::TrapType::IllegalInstruction,
-                            value: instr,
+                            tcause: crate::traps::TrapType::IllegalInstruction,
+                            tval: instr,
                         }),
                     },
                     0b001 => self.csrrw(instr),
@@ -299,8 +300,8 @@ impl CPU {
                     0b110 => self.csrrsi(instr),
                     0b111 => self.csrrci(instr),
                     _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
+                        tcause: crate::traps::TrapType::IllegalInstruction,
+                        tval: instr,
                     }),
                 },
                 0b0101111 => match get_funct3(instr) {
@@ -317,18 +318,18 @@ impl CPU {
                         0b11000 => self.amominu_w(instr),
                         0b11100 => self.amomaxu_w(instr),
                         _ => Err(Trap {
-                            trap_type: crate::traps::TrapType::IllegalInstruction,
-                            value: instr,
+                            tcause: crate::traps::TrapType::IllegalInstruction,
+                            tval: instr,
                         }),
                     },
                     _ => Err(Trap {
-                        trap_type: crate::traps::TrapType::IllegalInstruction,
-                        value: instr,
+                        tcause: crate::traps::TrapType::IllegalInstruction,
+                        tval: instr,
                     }),
                 },
                 _ => Err(Trap {
-                    trap_type: crate::traps::TrapType::IllegalInstruction,
-                    value: instr,
+                    tcause: crate::traps::TrapType::IllegalInstruction,
+                    tval: instr,
                 }),
             }
             .map(|_| 4)
@@ -338,8 +339,8 @@ impl CPU {
                 0b00 => match get_compressed_func3(compressed) {
                     0b000 => match compressed {
                         0 => Err(Trap {
-                            trap_type: crate::traps::TrapType::IllegalInstruction,
-                            value: instr,
+                            tcause: crate::traps::TrapType::IllegalInstruction,
+                            tval: instr,
                         }),
                         _ => todo!()
                     },
@@ -686,15 +687,15 @@ impl CPU {
     fn ecall(&mut self, instr: u32) -> Result<(), Trap> {
         let exception_type = TrapType::EnvironmentCallFromMMode; //TODO: Expand when adding privileges
         return Err(Trap {
-            trap_type: exception_type,
-            value: self.pc,
+            tcause: exception_type,
+            tval: self.pc,
         });
     }
     fn ebreak(&mut self, instr: u32) -> Result<(), Trap> {
         let exception_type = TrapType::Breakpoint;
         return Err(Trap {
-            trap_type: exception_type,
-            value: self.pc,
+            tcause: exception_type,
+            tval: self.pc,
         });
     }
 

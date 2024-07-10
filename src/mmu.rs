@@ -43,8 +43,8 @@ impl MMU {
                 todo!()
             }
             _ => Err(Trap {
-                trap_type: crate::traps::TrapType::InstructionAccessFault,
-                value: address,
+                tcause: crate::traps::TrapType::InstructionAccessFault,
+                tval: address,
             }),
         }
     }
@@ -60,8 +60,8 @@ impl MMU {
                 todo!()
             }
             _ => Err(Trap {
-                trap_type: crate::traps::TrapType::LoadAccessFault,
-                value: address,
+                tcause: crate::traps::TrapType::LoadAccessFault,
+                tval: address,
             }),
         }
     }
@@ -77,8 +77,8 @@ impl MMU {
                 todo!()
             }
             _ => Err(Trap {
-                trap_type: crate::traps::TrapType::LoadAccessFault,
-                value: address,
+                tcause: crate::traps::TrapType::LoadAccessFault,
+                tval: address,
             }),
         }
     }
@@ -89,8 +89,8 @@ impl MMU {
                 todo!()
             }
             _ => Err(Trap {
-                trap_type: crate::traps::TrapType::LoadAccessFault,
-                value: address,
+                tcause: crate::traps::TrapType::LoadAccessFault,
+                tval: address,
             }),
         }
     }
@@ -106,8 +106,8 @@ impl MMU {
                 todo!()
             }
             _ => Err(Trap {
-                trap_type: crate::traps::TrapType::StoreAccessFault,
-                value: address,
+                tcause: crate::traps::TrapType::StoreAccessFault,
+                tval: address,
             }),
         }
     }
@@ -123,8 +123,8 @@ impl MMU {
                 todo!()
             }
             _ => Err(Trap {
-                trap_type: crate::traps::TrapType::StoreAccessFault,
-                value: address,
+                tcause: crate::traps::TrapType::StoreAccessFault,
+                tval: address,
             }),
         }
     }
@@ -143,8 +143,8 @@ impl MMU {
                 todo!()
             }
             _ => Err(Trap {
-                trap_type: crate::traps::TrapType::StoreAccessFault,
-                value: address,
+                tcause: crate::traps::TrapType::StoreAccessFault,
+                tval: address,
             }),
         }
     }

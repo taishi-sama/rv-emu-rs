@@ -31,12 +31,12 @@ pub enum TrapType {
 }
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct Trap {
-    pub trap_type: TrapType,
-    pub value: u32,
+    pub tcause: TrapType,
+    pub tval: u32,
 }
 impl Trap {
     pub fn get_trap_cause(&self) -> u32 {
-        self.trap_type as u32
+        self.tcause as u32
     }
 }
 impl Display for Trap {
@@ -44,7 +44,7 @@ impl Display for Trap {
         write!(
             f,
             "Trap type: {}, 0x{:x}",
-            match self.trap_type {
+            match self.tcause {
                 TrapType::InstructionAddressMisaligned => "InstructionAddressMisaligned",
                 TrapType::InstructionAccessFault => "InstructionAccessFault",
                 TrapType::IllegalInstruction => "IllegalInstruction",
@@ -69,7 +69,7 @@ impl Display for Trap {
                 TrapType::SupervisorExternalInterrupt => "SupervisorExternalInterrupt",
                 TrapType::MachineExternalInterrupt => "MachineExternalInterrupt",
             },
-            self.value
+            self.tval
         )
     }
 }
