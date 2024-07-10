@@ -1,6 +1,5 @@
 use std::{
-    fs::File,
-    io::{self, Read},
+    env, fs::File, io::{self, Read}
 };
 
 pub mod cpu;
@@ -10,12 +9,17 @@ pub mod mmu;
 pub mod ops_decode;
 pub mod traps;
 pub mod uart;
+pub mod errors;
 //pub mod gdb;
 
 fn main() {
     //let mut m = mmu::MMU::default();
-    let path = "./bad_apple/target/riscv32imac-unknown-none-elf/release/bad_apple";
-    //let path = "./test_asm/target/testadd.s.elf";
+    //let path = "./bad_apple/target/riscv32i-unknown-none-elf/release/bad_apple";
+    //let path = "./test_asm/target/testtraps.s.elf";
+    let mut path: String = "./test_asm/target/testadd.s.elf".to_string();
+    if let Some(p) = env::args().skip(1).next() {
+        path = p
+    }
     println!("Loading elf \"{}\"", path);
     let mut elf_file = File::open(path).unwrap();
     let mut elf_contents = vec![];
@@ -30,7 +34,7 @@ fn main() {
         "t5", "t6",
     ];
 
-    let display = false;
+    let display = true;
     loop {
         //let display = true;
         let pc = emu.cpu.pc;
@@ -40,7 +44,7 @@ fn main() {
         }
         let res = emu.cpu.step();
         while let Some(x) = emu.cpu.mmu.uart.try_get_byte() {
-            print!("{}", x as char)
+            print!("{} ", x as char)
         }
         match res {
             Ok(instr) => {
@@ -57,7 +61,8 @@ fn main() {
                 }
             }
             Err(trap) => {
-                println!("Achieved trap: {} on address {:x}", trap, emu.cpu.pc);
+                //println!("Achieved trap: {} on address {:x}", trap, emu.cpu.pc);
+                println!("Encountered error! {trap:?}");
                 break;
             }
         }
@@ -86,7 +91,7 @@ mod test {
         elf_file.read_to_end(&mut elf_contents).unwrap();
         let mut emu = emulator::Emulator::from_elf(elf_contents);
         loop {
-            let res = emu.cpu.step();
+            let res = emu.cpu.execute_instruction();
             match res {
                 Ok(_) => (),
                 Err(_) => break,

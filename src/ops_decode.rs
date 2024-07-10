@@ -1,10 +1,10 @@
-//Shift number by $shift bits and trim $mask amount of bits. 
+//Shift number by $shift bits and trim $mask amount of bits.
 macro_rules! shift_and_trim {
     ($u:expr, $shift:expr, $mask:expr) => {
         ($u >> $shift & (u32::MAX >> (32 - $mask))) as _
     };
 }
-//Shift number by $shift bits and trim $mask amount of bits. 
+//Shift number by $shift bits and trim $mask amount of bits.
 macro_rules! shift_and_trim16 {
     ($u:expr, $shift:expr, $mask:expr) => {
         ($u >> $shift & (u16::MAX >> (16 - $mask))) as _
@@ -33,7 +33,6 @@ fn sign_extend16(data: u16, size: u16) -> u16 {
     debug_assert!(size > 0 && size <= 16);
     (((data << (16 - size)) as i16) >> (16 - size)) as u16
 }
-
 
 #[inline]
 pub fn get_opcode(instruction: u32) -> u8 {
@@ -95,7 +94,7 @@ pub fn get_rs3(instruction: u32) -> u8 {
     from_to_get(instruction, 27, 31, 0) as u8
 }
 pub fn get_csr_num(instruction: u32) -> u16 {
-    (instruction >> 12) as u16
+    (instruction >> 20) as u16
 }
 
 #[inline]
@@ -147,7 +146,17 @@ pub fn get_compressed_cj_jump_imm(instruction: u16) -> u32 {
     let off9_8: u32 = shift_and_trim!(raw_imm, 7, 2);
     let off4: u32 = shift_and_trim!(raw_imm, 9, 1);
     let off11: u32 = shift_and_trim!(raw_imm, 10, 1);
-    sign_extend32(off3_1 << 1 | off4 << 4 | off5 << 5 | off6 << 6 | off7 << 7 | off9_8 << 8 | off10 << 10 | off11 << 11, 12)
+    sign_extend32(
+        off3_1 << 1
+            | off4 << 4
+            | off5 << 5
+            | off6 << 6
+            | off7 << 7
+            | off9_8 << 8
+            | off10 << 10
+            | off11 << 11,
+        12,
+    )
 }
 //Don't appliable for C.LDSP, C.LQSP, C.FLDSP, C.SDSP, C.SQSP, C.FSDSP
 pub fn get_compressed_ci_stack_load_32_imm(instruction: u16) -> u32 {
@@ -191,7 +200,10 @@ pub fn get_compressed_cb_branch_imm(instruction: u16) -> u32 {
     let off4_3: u32 = shift_and_trim16!(instruction, 10, 2);
     let off8: u32 = shift_and_trim16!(instruction, 12, 1);
 
-    sign_extend32(off8 << 8 | off7_6 << 6 | off5 << 5 | off4_3 << 3 | off2_1 << 1, 9)  
+    sign_extend32(
+        off8 << 8 | off7_6 << 6 | off5 << 5 | off4_3 << 3 | off2_1 << 1,
+        9,
+    )
 }
 pub fn get_compressed_ci_addi16sp_imm(instruction: u16) -> u32 {
     let nzimm9: u32 = shift_and_trim16!(instruction, 12, 1);
@@ -199,7 +211,10 @@ pub fn get_compressed_ci_addi16sp_imm(instruction: u16) -> u32 {
     let nzimm8_7: u32 = shift_and_trim16!(instruction, 3, 2);
     let nzimm6: u32 = shift_and_trim16!(instruction, 5, 1);
     let nzimm4: u32 = shift_and_trim16!(instruction, 6, 1);
-    sign_extend32(nzimm4 << 4 | nzimm5 << 5 | nzimm6 << 6 | nzimm8_7 << 7 | nzimm9 << 9, 10)
+    sign_extend32(
+        nzimm4 << 4 | nzimm5 << 5 | nzimm6 << 6 | nzimm8_7 << 7 | nzimm9 << 9,
+        10,
+    )
 }
 pub fn get_compressed_ci_li_addi_imm(instruction: u16) -> u32 {
     let imm5: u32 = shift_and_trim16!(instruction, 12, 1);
@@ -396,7 +411,8 @@ fn parse_format_u(word: u32) -> FormatU {
 #[cfg(test)]
 mod tests {
     use crate::ops_decode::{
-        get_compressed_cj_jump_imm, get_funct3, get_funct7, get_imm_b_type, get_imm_i_type, get_imm_s_type, get_opcode, get_rd, get_rs1, get_rs2
+        get_compressed_cj_jump_imm, get_funct3, get_funct7, get_imm_b_type, get_imm_i_type,
+        get_imm_s_type, get_opcode, get_rd, get_rs1, get_rs2,
     };
 
     use super::{
@@ -523,7 +539,6 @@ mod tests {
         assert_eq!(left, right);
 
         //println!("0b{left:00$b}", 16);
-
     }
     #[test]
     fn test_i_encoding() {

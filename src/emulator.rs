@@ -1,6 +1,3 @@
-
-
-
 use crate::{cpu::CPU, elf_analyzer::elf_setup_mmu};
 
 pub struct Emulator {

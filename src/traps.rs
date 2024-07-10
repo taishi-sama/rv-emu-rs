@@ -38,6 +38,9 @@ impl Trap {
     pub fn get_trap_cause(&self) -> u32 {
         self.tcause as u32
     }
+    pub fn is_interupt(&self) -> bool {
+        self.tcause as u32 & INTERRUPT_BIT != 0
+    }
 }
 impl Display for Trap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -1,11 +1,9 @@
 use std::sync::{atomic::AtomicBool, Arc};
 
 use crate::{
-    mmu::{MMU, RAM_ADDRESS_END},
-    ops_decode::{
-        get_compressed_func3, get_funct3, get_funct7, get_imm_b_type, get_imm_i_type, get_imm_j_type, get_imm_s_type, get_imm_u_type, get_opcode, get_rd, get_rs1, get_rs2, get_rs3
-    },
-    traps::{Trap, TrapType},
+    errors::EmulatorError, mmu::{MMU, RAM_ADDRESS_END}, ops_decode::{
+        get_compressed_func3, get_csr_num, get_funct3, get_funct7, get_imm_b_type, get_imm_i_type, get_imm_j_type, get_imm_s_type, get_imm_u_type, get_opcode, get_rd, get_rs1, get_rs2, get_rs3
+    }, traps::{Trap, TrapType}
 };
 
 #[derive(Clone, Copy)]
@@ -97,39 +95,75 @@ impl CPU {
         self.x[x as usize]
     }
     //pub fn run_debugger(&mut self) {}
-    pub fn step(&mut self) -> Result<u32, Trap> {
+    pub fn execute_instruction(&mut self) -> Result<u32, Trap> {
         let instr = self.fetch()?;
-
-        self.pc += self.execute(instr)? as u32;
+        let instr_len = self.execute(instr)? as u32;
+        self.pc += instr_len;
         Ok(instr)
     }
-    pub fn process_trap(&mut self, trap: Trap) {
-        
-        match trap.tcause {
-            TrapType::InstructionAddressMisaligned => todo!(),
-            TrapType::InstructionAccessFault => todo!(),
-            TrapType::IllegalInstruction => todo!(),
-            TrapType::Breakpoint => todo!(),
-            TrapType::LoadAddressMisaligned => todo!(),
-            TrapType::LoadAccessFault => todo!(),
-            TrapType::StoreAddressMisaligned => todo!(),
-            TrapType::StoreAccessFault => todo!(),
-            TrapType::EnvironmentCallFromUMode => todo!(),
-            TrapType::EnvironmentCallFromSMode => todo!(),
-            TrapType::EnvironmentCallFromMMode => todo!(),
-            TrapType::InstructionPageFault => todo!(),
-            TrapType::LoadPageFault => todo!(),
-            TrapType::StorePageFault => todo!(),
-            TrapType::UserSoftwareInterrupt => todo!(),
-            TrapType::SupervisorSoftwareInterrupt => todo!(),
-            TrapType::MachineSoftwareInterrupt => todo!(),
-            TrapType::UserTimerInterrupt => todo!(),
-            TrapType::SupervisorTimerInterrupt => todo!(),
-            TrapType::MachineTimerInterrupt => todo!(),
-            TrapType::UserExternalInterrupt => todo!(),
-            TrapType::SupervisorExternalInterrupt => todo!(),
-            TrapType::MachineExternalInterrupt => todo!(),
+    pub fn step(&mut self) -> Result<u32, EmulatorError> {
+        let res = self.execute_instruction();
+        match res {
+            Ok(v) => {
+                return Ok(v);
+            }
+            Err(t) => {
+                self.process_trap(t)?;
+                return Ok(0);
+            }
         }
+    }
+    pub fn process_trap(&mut self, trap: Trap) -> Result<(), EmulatorError> {
+        if self.mtvec == 0 {
+            return Err(EmulatorError::UnsetTrapHandler);
+        }
+        self.privilege = PrivilegeMode::Machine;
+        self.mepc = self.pc;
+        self.mcause = trap.tcause as u32;
+        self.mtval = trap.tval;
+        let mode = self.mtvec & 0b11;
+
+        match mode {
+            0 => {
+                self.pc = self.mtvec & !0b11;
+            }
+            1 => {
+                todo!()
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+
+        //TODO
+
+        Ok(())
+
+        //match trap.tcause {
+        //    TrapType::InstructionAddressMisaligned => todo!(),
+        //    TrapType::InstructionAccessFault => todo!(),
+        //    TrapType::IllegalInstruction => todo!(),
+        //    TrapType::Breakpoint => todo!(),
+        //    TrapType::LoadAddressMisaligned => todo!(),
+        //    TrapType::LoadAccessFault => todo!(),
+        //    TrapType::StoreAddressMisaligned => todo!(),
+        //    TrapType::StoreAccessFault => todo!(),
+        //    TrapType::EnvironmentCallFromUMode => todo!(),
+        //    TrapType::EnvironmentCallFromSMode => todo!(),
+        //    TrapType::EnvironmentCallFromMMode => todo!(),
+        //    TrapType::InstructionPageFault => todo!(),
+        //    TrapType::LoadPageFault => todo!(),
+        //    TrapType::StorePageFault => todo!(),
+        //    TrapType::UserSoftwareInterrupt => todo!(),
+        //    TrapType::SupervisorSoftwareInterrupt => todo!(),
+        //    TrapType::MachineSoftwareInterrupt => todo!(),
+        //    TrapType::UserTimerInterrupt => todo!(),
+        //    TrapType::SupervisorTimerInterrupt => todo!(),
+        //    TrapType::MachineTimerInterrupt => todo!(),
+        //    TrapType::UserExternalInterrupt => todo!(),
+        //    TrapType::SupervisorExternalInterrupt => todo!(),
+        //    TrapType::MachineExternalInterrupt => todo!(),
+        //}
     }
 
     fn fetch(&mut self) -> Result<u32, Trap> {
@@ -288,10 +322,25 @@ impl CPU {
                     0b000 => match get_imm_i_type(instr) {
                         0 => self.ecall(instr),
                         1 => self.ebreak(instr),
-                        _ => Err(Trap {
-                            tcause: crate::traps::TrapType::IllegalInstruction,
-                            tval: instr,
-                        }),
+
+                        a @ _ => {
+                            if get_rs1(instr) == 0 && get_rd(instr) == 0 {
+                                match a {
+                                    0b000100000010 => self.sret(instr),
+                                    0b001100000010 => self.mret(instr),
+                                    0b000100000101 => self.wfi(instr),
+                                    _ => Err(Trap {
+                                        tcause: crate::traps::TrapType::IllegalInstruction,
+                                        tval: instr,
+                                    }),
+                                }
+                            } else {
+                                Err(Trap {
+                                    tcause: crate::traps::TrapType::IllegalInstruction,
+                                    tval: instr,
+                                })
+                            }
+                        }
                     },
                     0b001 => self.csrrw(instr),
                     0b010 => self.csrrs(instr),
@@ -342,10 +391,9 @@ impl CPU {
                             tcause: crate::traps::TrapType::IllegalInstruction,
                             tval: instr,
                         }),
-                        _ => todo!()
+                        _ => todo!(),
                     },
-                    _ => todo!()
-
+                    _ => todo!(),
                 },
                 0b01 => todo!("0b{compressed:00$b}| opcode {micro_opcode}", 16),
                 0b10 => todo!("0b{compressed:00$b}| opcode {micro_opcode}", 16),
@@ -751,9 +799,33 @@ impl CPU {
         };
         Ok(true)
     }
-
-    fn csrrw(&mut self, instr: u32) -> Result<(), Trap> {
+    fn sret(&mut self, instr: u32) -> Result<(), Trap> {
         todo!()
+    }
+    fn mret(&mut self, instr: u32) -> Result<(), Trap> {
+        //TODO Do csr register shenenigans when implement multiple levels of priveleges.
+        self.pc = self.mepc.wrapping_sub(4);
+        Ok(())
+    }
+    fn wfi(&mut self, instr: u32) -> Result<(), Trap> {
+        todo!()
+    }
+    fn csrrw(&mut self, instr: u32) -> Result<(), Trap> {
+        let csr = get_csr_num(instr);
+        let rs1 = get_rs1(instr);
+        let rd = get_rd(instr);
+        if rd != 0 {
+            let val = self.get_csr(csr)?;
+            if !self.set_csr(csr, self.get_x(rs1))? {
+                todo!("Handle write in read-only registers")
+            }
+            self.set_x(rd, val)
+        } else {
+            if !self.set_csr(csr, self.get_x(rs1))? {
+                todo!("Handle write in read-only registers")
+            }
+        }
+        Ok(())
     }
     fn csrrs(&mut self, instr: u32) -> Result<(), Trap> {
         todo!()
@@ -898,15 +970,7 @@ impl CPU {
     fn amomaxu_w(&mut self, instr: u32) -> Result<(), Trap> {
         todo!()
     }
-    fn sret(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
-    }
-    fn mret(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
-    }
-    fn wfi(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
-    }
+
     fn c_addi4spn(&mut self, instr: u16) -> Result<(), Trap> {
         todo!()
     }
