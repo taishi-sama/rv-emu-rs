@@ -834,7 +834,21 @@ impl CPU {
         todo!()
     }
     fn csrrwi(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        let csr = get_csr_num(instr);
+        let rs1 = get_rs1(instr);
+        let rd = get_rd(instr);
+        if rd != 0 {
+            let val = self.get_csr(csr)?;
+            if !self.set_csr(csr, rs1 as u32)? {
+                todo!("Handle write in read-only registers")
+            }
+            self.set_x(rd, val)
+        } else {
+            if !self.set_csr(csr, self.get_x(rs1))? {
+                todo!("Handle write in read-only registers")
+            }
+        }
+        Ok(())  
     }
     fn csrrsi(&mut self, instr: u32) -> Result<(), Trap> {
         todo!()

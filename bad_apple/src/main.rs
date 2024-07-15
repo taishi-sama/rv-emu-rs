@@ -3,11 +3,12 @@
 
 use core::{panic::PanicInfo, fmt::{Write, self}, arch::asm};
 
+use riscv_rt::entry;
 
-
-#[inline(never)]
-#[no_mangle]
-pub fn main() {
+#[entry]
+//#[inline(never)]
+//#[no_mangle]
+fn main() -> ! {
 
     let mut uart = UART::new();
     //let my_str = "";
@@ -16,21 +17,25 @@ pub fn main() {
         writeln!(uart, "{}", i).unwrap();
         writeln!(uart, "{}", s).unwrap();
 
-        for _ in 0..3100000 {
+        for _ in 0..5100000 {
             unsafe{
                 asm!("nop");
             }
         }
     }
     writeln!(uart, "{}", 1000).unwrap();   
-}
-#[no_mangle]
-pub extern "C" fn __start() -> ! {
-    main();
     loop {
         
     }
 }
+
+//#[no_mangle]
+//pub extern "C" fn __start() -> ! {
+//    main();
+//    loop {
+//        
+//    }
+//}
 
 unsafe fn send_to_uart(byte: u8) {
     let t: usize = 0x10000000;

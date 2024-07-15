@@ -10,13 +10,16 @@ pub mod ops_decode;
 pub mod traps;
 pub mod uart;
 pub mod errors;
+pub mod manual_debugger;
 //pub mod gdb;
 
 fn main() {
     //let mut m = mmu::MMU::default();
-    //let path = "./bad_apple/target/riscv32i-unknown-none-elf/release/bad_apple";
+    //let mut path = "./bad_apple/target/riscv32i-unknown-none-elf/release/bad_apple".to_string();
+    let mut path = "./bad_apple/target/riscv32i-unknown-none-elf/release/bad_apple".to_string();
+    
     //let path = "./test_asm/target/testtraps.s.elf";
-    let mut path: String = "./test_asm/target/testadd.s.elf".to_string();
+    //let mut path: String = "./test_asm/target/testadd.s.elf".to_string();
     if let Some(p) = env::args().skip(1).next() {
         path = p
     }
@@ -34,7 +37,7 @@ fn main() {
         "t5", "t6",
     ];
 
-    let display = true;
+    let display = false;
     loop {
         //let display = true;
         let pc = emu.cpu.pc;
@@ -44,7 +47,7 @@ fn main() {
         }
         let res = emu.cpu.step();
         while let Some(x) = emu.cpu.mmu.uart.try_get_byte() {
-            print!("{} ", x as char)
+            print!("{}", x as char)
         }
         match res {
             Ok(instr) => {

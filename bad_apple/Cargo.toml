@@ -7,3 +7,4 @@ edition = "2021"
 
 
 [dependencies]
+riscv-rt = { version = "0.12.2", features = ["single-hart"] }
