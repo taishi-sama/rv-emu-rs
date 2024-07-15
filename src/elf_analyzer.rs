@@ -731,7 +731,7 @@ impl ElfAnalyzer {
     }
 }
 
-pub fn elf_setup_mmu(elf: Vec<u8>) -> (MMU, u32) {
+pub fn elf_setup_mmu(elf: Vec<u8>, mmu: &mut MMU) -> u32 {
     let analyzer = ElfAnalyzer::new(elf);
     let mut symbol_map: HashMap<String, u64> = HashMap::new();
     if !analyzer.validate() {
@@ -770,7 +770,7 @@ pub fn elf_setup_mmu(elf: Vec<u8>) -> (MMU, u32) {
 
     // Detected whether the elf file is riscv-tests.
     // Setting up CPU and Memory depending on it.
-    let mut mmu = MMU::default();
+    //let mut mmu = MMU::default();
     for i in 0..program_data_section_headers.len() {
         let sh_addr = program_data_section_headers[i].sh_addr;
         let sh_offset = program_data_section_headers[i].sh_offset as usize;
@@ -786,5 +786,5 @@ pub fn elf_setup_mmu(elf: Vec<u8>) -> (MMU, u32) {
         }
     }
 
-    (mmu, header.e_entry as u32)
+    header.e_entry as u32
 }

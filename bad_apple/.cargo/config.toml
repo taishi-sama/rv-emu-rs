@@ -1,7 +1,7 @@
 [target.riscv32i-unknown-none-elf]
 rustflags = ["-C", "panic=abort", "-C", "link-arg=-Tdevice.x"]
-[target.riscv32imac-unknown-none-elf]
-rustflags = ["-C", "link-arg=-Tdevice.x"]
+[target.riscv32ima-unknown-none-elf]
+rustflags = ["-C", "panic=abort", "-C", "link-arg=-Tdevice.x"]
 [build]
-target = "riscv32i-unknown-none-elf"
+target = "riscv32ima-unknown-none-elf"
 

@@ -1,4 +1,4 @@
-use std::sync::{atomic::AtomicBool, Arc};
+use std::{sync::{atomic::AtomicBool, Arc}, time::Instant};
 
 use crate::{
     errors::EmulatorError, mmu::{MMU, RAM_ADDRESS_END}, ops_decode::{
@@ -44,6 +44,9 @@ pub struct CPU {
     pub wfi: bool,
     pub reservation_slot: Option<u32>,
     pub stopflag: Option<Arc<AtomicBool>>,
+    
+    
+    pub start_time: Instant,
 }
 
 #[allow(dead_code)]
@@ -75,6 +78,7 @@ impl CPU {
             wfi: false,
             reservation_slot: None,
             stopflag: None,
+            start_time: Instant::now(),
         }
     }
     pub fn get_registers(&self) -> [u32; 32] {
@@ -173,7 +177,7 @@ impl CPU {
         let opcode = get_opcode(instr);
         let micro_opcode = opcode & 0b11;
         if micro_opcode == 0b11 {
-            //Обработка обычных инструкций
+            //Common instructions processing
             match opcode {
                 0b0110111 => self.lui(instr),
                 0b0010111 => self.auipc(instr),
@@ -401,7 +405,9 @@ impl CPU {
             }
         }
     }
-
+    fn time_reader(&self) -> u64 {
+        self.start_time.elapsed().as_micros() as u64
+    }
     fn lui(&mut self, instr: u32) -> Result<(), Trap> {
         let rd = get_rd(instr);
         let imm = get_imm_u_type(instr);
@@ -767,6 +773,9 @@ impl CPU {
             0xf15 => 0x0,                                     //mconfigptr
             0x301 => 0b01_0_10000_00000000_00010001_00000001, //misa, XLEN=32, IMA+X
 
+
+            0xC01 => self.time_reader() as u32, //time
+            0xC81 => (self.time_reader() >> 32) as u32, //timeh
             _ => todo!("CSR {csr:0x} not implemented"),
         })
     }
@@ -828,10 +837,38 @@ impl CPU {
         Ok(())
     }
     fn csrrs(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        let csr = get_csr_num(instr);
+        let rs1 = get_rs1(instr);
+        let rd = get_rd(instr);
+        if rs1 != 0 {
+            let val = self.get_csr(csr)?;
+            let set_bits = val | self.get_x(rs1);
+            if !self.set_csr(csr, set_bits)? {
+                todo!("Handle read in write-only registers")
+            }
+            self.set_x(rd, val)
+        } else {
+            let val = self.get_csr(csr)?;
+            self.set_x(rd, val)
+        }
+        Ok(())
     }
     fn csrrc(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        let csr = get_csr_num(instr);
+        let rs1 = get_rs1(instr);
+        let rd = get_rd(instr);
+        if rs1 != 0 {
+            let val = self.get_csr(csr)?;
+            let set_bits = val & !self.get_x(rs1);
+            if !self.set_csr(csr, set_bits)? {
+                todo!("Handle read in write-only registers")
+            }
+            self.set_x(rd, val)
+        } else {
+            let val = self.get_csr(csr)?;
+            self.set_x(rd, val)
+        }
+        Ok(())
     }
     fn csrrwi(&mut self, instr: u32) -> Result<(), Trap> {
         let csr = get_csr_num(instr);
@@ -1066,4 +1103,5 @@ impl CPU {
     fn c_swsp(&mut self, instr: u16) -> Result<(), Trap> {
         todo!()
     }
+    
 }

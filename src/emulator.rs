@@ -1,4 +1,4 @@
-use crate::{cpu::CPU, elf_analyzer::elf_setup_mmu};
+use crate::{cpu::CPU, elf_analyzer::elf_setup_mmu, mmu::MMU};
 
 pub struct Emulator {
     pub cpu: CPU,
@@ -6,9 +6,9 @@ pub struct Emulator {
 
 impl Emulator {
     //TODO: make fallable interface
-    pub fn from_elf(elf: Vec<u8>) -> Self {
-        let (mm, pc) = elf_setup_mmu(elf);
-        let mut cpu = CPU::new(mm);
+    pub fn from_elf(elf: Vec<u8>, mut mmu: MMU) -> Self {
+        let pc = elf_setup_mmu(elf, &mut mmu);
+        let mut cpu = CPU::new(mmu);
         cpu.pc = pc;
         Emulator { cpu }
     }

@@ -1,4 +1,4 @@
-use crate::{traps::Trap, uart::UART};
+use crate::{primitive_audio::{self, PrimitiveAudioProducer, PrimitiveAudioReciever}, traps::Trap, uart::UART};
 
 pub const RAM_SIZE: usize = 64 * 1024 * 1024;
 
@@ -8,23 +8,26 @@ pub const RAM_ADDRESS_END: u32 = RAM_ADDRESS + RAM_SIZE as u32 - 1;
 pub const UART_REGION_SIZE: usize = 0x100;
 pub const UART_ADDRESS: u32 = 0x10000000;
 pub const UART_ADDRESS_END: u32 = 0x10000000 + UART_REGION_SIZE as u32 - 1;
+pub const PRIMITIVE_AUDIO_ADDRESS: u32 = 0x10000200;
+
 
 pub struct MMU {
     memory: Box<[u8]>,
     pub uart: UART,
+    pub audio: PrimitiveAudioReciever
 }
-impl Default for MMU {
-    fn default() -> Self {
-        let v = vec![0; RAM_SIZE];
 
-        MMU {
-            memory: v.into(),
-            uart: UART::new(),
-        }
-    }
-}
 
 impl MMU {
+    pub fn new() -> (Self, PrimitiveAudioProducer) {
+        let v = vec![0; RAM_SIZE];
+        let (audio_res, audio_prod) = primitive_audio::create_primitive_audio_pair();
+        (MMU {
+            memory: v.into(),
+            uart: UART::new(),
+            audio: audio_res,
+        }, audio_prod)
+    }
     pub fn fetch_word(&self, address: u32) -> Result<u32, Trap> {
         //if address % 2 != 0 {
         //    return Err(Trap {
@@ -40,6 +43,9 @@ impl MMU {
                 ))
             }
             UART_ADDRESS..=UART_ADDRESS_END => {
+                todo!()
+            }
+            PRIMITIVE_AUDIO_ADDRESS => {
                 todo!()
             }
             _ => Err(Trap {
@@ -59,6 +65,9 @@ impl MMU {
             UART_ADDRESS..=UART_ADDRESS_END => {
                 todo!()
             }
+            PRIMITIVE_AUDIO_ADDRESS => {
+                Ok(self.audio.get_size())
+            }
             _ => Err(Trap {
                 tcause: crate::traps::TrapType::LoadAccessFault,
                 tval: address,
@@ -76,6 +85,9 @@ impl MMU {
             UART_ADDRESS..=UART_ADDRESS_END => {
                 todo!()
             }
+            PRIMITIVE_AUDIO_ADDRESS => {
+                todo!()
+            }
             _ => Err(Trap {
                 tcause: crate::traps::TrapType::LoadAccessFault,
                 tval: address,
@@ -86,6 +98,9 @@ impl MMU {
         match address {
             RAM_ADDRESS..=RAM_ADDRESS_END => Ok(self.memory[(address - RAM_ADDRESS) as usize]),
             UART_ADDRESS..=UART_ADDRESS_END => {
+                todo!()
+            }
+            PRIMITIVE_AUDIO_ADDRESS => {
                 todo!()
             }
             _ => Err(Trap {
@@ -105,6 +120,9 @@ impl MMU {
             UART_ADDRESS..=UART_ADDRESS_END => {
                 todo!()
             }
+            PRIMITIVE_AUDIO_ADDRESS => {
+                todo!()
+            }
             _ => Err(Trap {
                 tcause: crate::traps::TrapType::StoreAccessFault,
                 tval: address,
@@ -121,6 +139,9 @@ impl MMU {
             }
             UART_ADDRESS..=UART_ADDRESS_END => {
                 todo!()
+            }
+            PRIMITIVE_AUDIO_ADDRESS => {
+                Ok(self.audio.write(halfword as i16))
             }
             _ => Err(Trap {
                 tcause: crate::traps::TrapType::StoreAccessFault,
@@ -140,6 +161,9 @@ impl MMU {
                 Ok(())
             }
             UART_ADDRESS..=UART_ADDRESS_END => {
+                todo!()
+            }
+            PRIMITIVE_AUDIO_ADDRESS => {
                 todo!()
             }
             _ => Err(Trap {

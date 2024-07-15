@@ -2,6 +2,9 @@ use std::{
     env, fs::File, io::{self, Read}
 };
 
+use mmu::MMU;
+use rodio::{OutputStream, Source};
+
 pub mod cpu;
 pub mod elf_analyzer;
 pub mod emulator;
@@ -11,24 +14,28 @@ pub mod traps;
 pub mod uart;
 pub mod errors;
 pub mod manual_debugger;
+pub mod primitive_audio;
 //pub mod gdb;
 
 fn main() {
     //let mut m = mmu::MMU::default();
-    //let mut path = "./bad_apple/target/riscv32i-unknown-none-elf/release/bad_apple".to_string();
     let mut path = "./bad_apple/target/riscv32i-unknown-none-elf/release/bad_apple".to_string();
+    //let mut path = "./bad_apple/target/riscv32i-unknown-none-elf/debug/bad_apple".to_string();
     
     //let path = "./test_asm/target/testtraps.s.elf";
     //let mut path: String = "./test_asm/target/testadd.s.elf".to_string();
     if let Some(p) = env::args().skip(1).next() {
         path = p
     }
+    let (_stream, stream_handle) = OutputStream::try_default().unwrap();
     println!("Loading elf \"{}\"", path);
     let mut elf_file = File::open(path).unwrap();
     let mut elf_contents = vec![];
     elf_file.read_to_end(&mut elf_contents).unwrap();
 
-    let mut emu = emulator::Emulator::from_elf(elf_contents);
+    let (mmu, audio) = MMU::new();
+    stream_handle.play_raw(audio.convert_samples()).unwrap();
+    let mut emu = emulator::Emulator::from_elf(elf_contents, mmu);
     let mut stdin = io::stdin();
     println!("Start executing...");
     let reg_names = [
@@ -86,13 +93,14 @@ fn main() {
 mod test {
     use std::{fs::File, io::Read, path::Path};
 
-    use crate::emulator;
+    use crate::{emulator, mmu::MMU};
 
     pub fn run_arch_tests(path: &Path) {
         let mut elf_file = File::open(path).unwrap();
         let mut elf_contents = vec![];
         elf_file.read_to_end(&mut elf_contents).unwrap();
-        let mut emu = emulator::Emulator::from_elf(elf_contents);
+        let mmu = MMU::new();
+        let mut emu = emulator::Emulator::from_elf(elf_contents, mmu.0);
         loop {
             let res = emu.cpu.execute_instruction();
             match res {
