@@ -15,7 +15,7 @@ elf_analyzer.rs and some parts of code was took from [riscv-rust emulator](https
 
 
 ## Bad Apple example
-Rights to "Bad Apple!!" is owned by Alstroemeria Records
+Rights to "Bad Apple!!" is owned by Alstroemeria Records. 
 bad_apple/Bad Apple!!.ogg was ripped from [this video](https://www.youtube.com/watch?v=FtutLA63Cp8).
 
 Thanks to [Chion82](https://github.com/Chion82/ASCII_bad_apple) for their ASCII-conversion of video clip.
