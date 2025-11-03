@@ -45,7 +45,9 @@ fn main() {
     ];
 
     let display = false;
+    let mut counter: u128 = 1;
     loop {
+        
         //let display = true;
         let pc = emu.cpu.pc;
         if display {
@@ -59,7 +61,7 @@ fn main() {
         match res {
             Ok(instr) => {
                 if display {
-                    println!("Executed instruction 0x{:0>8x} on address {:x}", instr, pc);
+                    println!("Executed instruction 0x{:0>8x} on address {:x}; instruction no {}", instr, pc, counter);
                     for (ind, x) in emu.cpu.get_registers().into_iter().enumerate() {
                         let reg_name = reg_names[ind];
                         print!("{reg_name:<3}: {:^10x}; ", x);
@@ -76,6 +78,12 @@ fn main() {
                 break;
             }
         }
+        
+        // if counter%100000000 == 0 {
+        //    emu.cpu.process_trap(traps::Trap { tcause: traps::TrapType::EnvironmentCallFromMMode, tval: 0 }).unwrap();
+        // }
+        
+        counter += 1;
     }
     println!("UART output buffer:");
     let mut v = vec![];
@@ -83,6 +91,7 @@ fn main() {
         //print!("{}", x as char)
         v.push(x)
     }
+
     for i in v.chunks_exact(2) {
         println!("Test {}: {}", i[1], i[0] as char)
     }

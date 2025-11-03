@@ -23,14 +23,12 @@ pub struct CPU {
 
     //CSRs
     //pub CSRs: [u32; 4096],
-    pub mstatus: u32,
-    pub mstatush: u32,
-    pub cyclel: u32,
-    pub cycleh: u32,
-    pub timerl: u32,
-    pub timerh: u32,
-    pub timermatchl: u32,
-    pub timermatchh: u32,
+    pub mstatus: u64,
+    pub cycle: u64,
+    pub mtimecmp: u64,
+
+    pub time_crs_start: Instant,
+
 
     pub mscratch: u32,
     pub mtvec: u32,
@@ -46,7 +44,6 @@ pub struct CPU {
     pub stopflag: Option<Arc<AtomicBool>>,
     
     
-    pub start_time: Instant,
 }
 
 #[allow(dead_code)]
@@ -60,13 +57,8 @@ impl CPU {
             pc: 0,
             mmu,
             mstatus: 0,
-            mstatush: 0,
-            cyclel: 0,
-            cycleh: 0,
-            timerl: 0,
-            timerh: 0,
-            timermatchl: 0,
-            timermatchh: 0,
+            cycle: 0,
+            mtimecmp: 0,
             mscratch: 0,
             mtvec: 0,
             mie: 0,
@@ -78,7 +70,7 @@ impl CPU {
             wfi: false,
             reservation_slot: None,
             stopflag: None,
-            start_time: Instant::now(),
+            time_crs_start: Instant::now(),
         }
     }
     pub fn get_registers(&self) -> [u32; 32] {
@@ -118,6 +110,7 @@ impl CPU {
         }
     }
     pub fn process_trap(&mut self, trap: Trap) -> Result<(), EmulatorError> {
+        // println!("TRAP!\nTRAP!\nTRAP!\nTRAP!\n{}", trap);
         if self.mtvec == 0 {
             return Err(EmulatorError::UnsetTrapHandler);
         }
@@ -405,8 +398,8 @@ impl CPU {
             }
         }
     }
-    fn time_reader(&self) -> u64 {
-        self.start_time.elapsed().as_micros() as u64
+    fn timer_reader(&self) -> u64 {
+        self.time_crs_start.elapsed().as_micros() as u64
     }
     fn lui(&mut self, instr: u32) -> Result<(), Trap> {
         let rd = get_rd(instr);
@@ -759,11 +752,9 @@ impl CPU {
             0x340 => self.mscratch,
             0x305 => self.mtvec,
             0x304 => self.mie,
-            0xC00 => self.cyclel,
-            0xC80 => self.cycleh,
+
             0x344 => self.mip,
             0x341 => self.mepc,
-            0x300 => self.mstatus, //mstatus
             0x342 => self.mcause,
             0x343 => self.mtval,
             0xf11 => 0xff0ff0ff,                              //vendorId
@@ -773,9 +764,17 @@ impl CPU {
             0xf15 => 0x0,                                     //mconfigptr
             0x301 => 0b01_0_10000_00000000_00010001_00000001, //misa, XLEN=32, IMA+X
 
+            0x300 => self.mstatus as u32, //mstatus
+            0x310 => (self.mstatus >> 32) as u32, //mstatus
 
-            0xC01 => self.time_reader() as u32, //time
-            0xC81 => (self.time_reader() >> 32) as u32, //timeh
+
+            0xC00 => self.cycle as u32,
+            0xC80 => (self.cycle >> 32) as u32,
+            
+
+
+            0xC01 => self.timer_reader() as u32, //time
+            0xC81 => (self.timer_reader() >> 32) as u32, //timeh
             _ => todo!("CSR {csr:0x} not implemented"),
         })
     }
@@ -794,8 +793,8 @@ impl CPU {
             } //cycleh
             0x344 => self.mip = new_val,
             0x341 => self.mepc = new_val,
-            0x300 => self.mstatus = new_val, //mstatus
-            0x310 => self.mstatush = new_val,
+            0x300 => { self.mstatus &= !(u32::MAX as u64); self.mstatus |= new_val as u64 }, //mstatus
+            0x310 => { self.mstatus &= u32::MAX as u64; self.mstatus |= (new_val as u64) << 32 },
             0x342 => self.mcause = new_val,
             0x343 => self.mtval = new_val,
             0xf11..=0xf15 => {
@@ -892,6 +891,7 @@ impl CPU {
     }
     fn csrrci(&mut self, instr: u32) -> Result<(), Trap> {
         todo!()
+        // Ok(())
     }
     fn mul(&mut self, instr: u32) -> Result<(), Trap> {
         let rs1 = get_rs1(instr);
