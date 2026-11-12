@@ -3,11 +3,11 @@ use std::sync::{atomic::AtomicU32, Arc};
 use rb::{RbConsumer, RbInspector, RbProducer, RB};
 use rodio::Source;
 
-pub struct PrimitiveAudioReciever {
+pub struct PrimitiveAudioReceiver {
     internal_buffer: rb::Producer<i16>,
     buffer: rb::SpscRb<i16>,
 }
-impl PrimitiveAudioReciever {
+impl PrimitiveAudioReceiver {
     pub fn write(&mut self, val: i16) {
         self.internal_buffer.write(&[val]).unwrap();
     }
@@ -17,11 +17,8 @@ impl PrimitiveAudioReciever {
 }
 pub struct PrimitiveAudioProducer {
     internal_buffer: rb::Consumer<i16>,
-
 }
-impl PrimitiveAudioProducer {
-    
-}
+impl PrimitiveAudioProducer {}
 
 impl Source for PrimitiveAudioProducer {
     fn current_frame_len(&self) -> Option<usize> {
@@ -49,12 +46,20 @@ impl Iterator for PrimitiveAudioProducer {
         if res.is_err() {
             arr[0] = 0
         }
-        Some( arr[0] as f32 / (i16::MAX as f32) )
+        Some(arr[0] as f32 / (i16::MAX as f32))
     }
 }
 
-pub fn create_primitive_audio_pair() -> (PrimitiveAudioReciever, PrimitiveAudioProducer) {
+pub fn create_primitive_audio_pair() -> (PrimitiveAudioReceiver, PrimitiveAudioProducer) {
     let rb = rb::SpscRb::new(44100 * 8);
     let (cons, prod) = (rb.consumer(), rb.producer());
-    (PrimitiveAudioReciever { internal_buffer: prod, buffer: rb }, PrimitiveAudioProducer { internal_buffer: cons } )
+    (
+        PrimitiveAudioReceiver {
+            internal_buffer: prod,
+            buffer: rb,
+        },
+        PrimitiveAudioProducer {
+            internal_buffer: cons,
+        },
+    )
 }

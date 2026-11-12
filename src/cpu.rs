@@ -1,9 +1,19 @@
-use std::{sync::{atomic::AtomicBool, Arc}, time::Instant};
+use std::{
+    sync::{atomic::AtomicBool, Arc},
+    time::Instant,
+};
 
 use crate::{
-    errors::EmulatorError, mmu::{MMU, RAM_ADDRESS_END}, ops_decode::{
-        get_compressed_func3, get_csr_num, get_funct3, get_funct7, get_imm_b_type, get_imm_i_type, get_imm_j_type, get_imm_s_type, get_imm_u_type, get_opcode, get_rd, get_rs1, get_rs2, get_rs3
-    }, traps::{Trap, TrapType}
+    errors::EmulatorError,
+    mmu::{MMU, RAM_ADDRESS, RAM_SIZE},
+    ops_decode::{
+        get_compressed_ci_addi16sp_imm, get_compressed_ci_lui_imm, get_compressed_ciw_addi4spn_imm,
+        get_compressed_func, get_compressed_func3, get_compressed_func6, get_compressed_rd,
+        get_compressed_rs2, get_csr_num, get_funct3, get_funct7, get_imm_b_type, get_imm_i_type,
+        get_imm_j_type, get_imm_s_type, get_imm_u_type, get_opcode, get_rd, get_rs1, get_rs2,
+        get_rs3,
+    },
+    traps::{Trap, TrapType},
 };
 
 #[derive(Clone, Copy)]
@@ -29,7 +39,6 @@ pub struct CPU {
 
     pub time_crs_start: Instant,
 
-
     pub mscratch: u32,
     pub mtvec: u32,
     pub mie: u32,
@@ -42,8 +51,6 @@ pub struct CPU {
     pub wfi: bool,
     pub reservation_slot: Option<u32>,
     pub stopflag: Option<Arc<AtomicBool>>,
-    
-    
 }
 
 #[allow(dead_code)]
@@ -51,7 +58,7 @@ pub struct CPU {
 impl CPU {
     pub fn new(mmu: MMU) -> Self {
         let mut x = [0; 32];
-        x[2] = RAM_ADDRESS_END - 0x4; // - 0x4000;
+        x[2] = RAM_ADDRESS + RAM_SIZE as u32 - 0x4;
         CPU {
             x,
             pc: 0,
@@ -94,7 +101,7 @@ impl CPU {
     pub fn execute_instruction(&mut self) -> Result<u32, Trap> {
         let instr = self.fetch()?;
         let instr_len = self.execute(instr)? as u32;
-        self.pc += instr_len;
+        self.pc = self.pc.wrapping_add(instr_len);
         Ok(instr)
     }
     pub fn step(&mut self) -> Result<u32, EmulatorError> {
@@ -125,7 +132,7 @@ impl CPU {
                 self.pc = self.mtvec & !0b11;
             }
             1 => {
-                todo!()
+                todo!("Vectored trap handling is not implemented")
             }
             _ => {
                 unreachable!()
@@ -163,8 +170,18 @@ impl CPU {
         //}
     }
 
+    //Instruction width is encoded in the two least significant bits: a 16 bit (compressed)
+    //instruction has them set to something other than 0b11, otherwise the instruction continues
+    //into the following halfword. The upper half of the returned word is zero for compressed
+    //instructions.
     fn fetch(&mut self) -> Result<u32, Trap> {
-        self.mmu.fetch_word(self.pc)
+        let lower = self.mmu.fetch_halfword(self.pc)?;
+        if lower & 0b11 == 0b11 {
+            let upper = self.mmu.fetch_halfword(self.pc.wrapping_add(2))?;
+            Ok(lower as u32 | (upper as u32) << 16)
+        } else {
+            Ok(lower as u32)
+        }
     }
     fn execute(&mut self, instr: u32) -> Result<u8, Trap> {
         let opcode = get_opcode(instr);
@@ -299,7 +316,7 @@ impl CPU {
                     },
                     0b111 => match get_funct7(instr) {
                         0 => self.and(instr),
-                        1 => self.rem(instr),
+                        1 => self.remu(instr),
                         _ => Err(Trap {
                             tcause: crate::traps::TrapType::IllegalInstruction,
                             tval: instr,
@@ -380,22 +397,111 @@ impl CPU {
             }
             .map(|_| 4)
         } else {
-            let compressed = instr as u16;
-            match micro_opcode {
-                0b00 => match get_compressed_func3(compressed) {
-                    0b000 => match compressed {
-                        0 => Err(Trap {
-                            tcause: crate::traps::TrapType::IllegalInstruction,
-                            tval: instr,
-                        }),
-                        _ => todo!(),
-                    },
-                    _ => todo!(),
+            //Compressed instructions are 16 bits wide
+            self.execute_compressed(instr).map(|_| 2)
+        }
+    }
+    fn execute_compressed(&mut self, instr: u32) -> Result<(), Trap> {
+        let compressed = instr as u16;
+        match compressed & 0b11 {
+            //Quadrant 0
+            0b00 => match get_compressed_func3(compressed) {
+                0b000 => match get_compressed_ciw_addi4spn_imm(compressed) {
+                    //nzuimm == 0 is a reserved encoding
+                    0 => Err(illegal_instruction(instr)),
+                    _ => self.c_addi4spn(compressed),
                 },
-                0b01 => todo!("0b{compressed:00$b}| opcode {micro_opcode}", 16),
-                0b10 => todo!("0b{compressed:00$b}| opcode {micro_opcode}", 16),
+                0b010 => self.c_lw(compressed),
+                0b110 => self.c_sw(compressed),
+                //0b001/0b011/0b101/0b111 are the F/D load and store forms, 0b100 is reserved
+                _ => Err(illegal_instruction(instr)),
+            },
+            //Quadrant 1
+            0b01 => match get_compressed_func3(compressed) {
+                0b000 => match get_compressed_rd(compressed) {
+                    0 => self.c_nop(compressed),
+                    _ => self.c_addi(compressed),
+                },
+                0b001 => self.c_jal(compressed),
+                0b010 => self.c_li(compressed),
+                0b011 => {
+                    let rd = get_compressed_rd(compressed);
+                    //C.ADDI16SP and C.LUI share the encoding, rd == 2 selects C.ADDI16SP
+                    let nzimm = if rd == 2 {
+                        get_compressed_ci_addi16sp_imm(compressed)
+                    } else {
+                        get_compressed_ci_lui_imm(compressed)
+                    };
+                    if nzimm == 0 {
+                        //nzimm == 0 is a reserved encoding for both instructions
+                        Err(illegal_instruction(instr))
+                    } else {
+                        match rd {
+                            //rd == 0 is a HINT for C.LUI and executes as a no-op
+                            0 => self.c_nop(compressed),
+                            2 => self.c_addi16sp(compressed),
+                            _ => self.c_lui(compressed),
+                        }
+                    }
+                }
+                0b100 => match get_compressed_func6(compressed) {
+                    0b100000 => self.c_srli(compressed),
+                    0b100001 => self.c_srai(compressed),
+                    //C.ANDI: bit 12 is imm[5], so both variants are the same instruction
+                    0b100010 | 0b100110 => self.c_andi(compressed),
+                    0b100011 => match get_compressed_func(compressed) {
+                        0b00 => self.c_sub(compressed),
+                        0b01 => self.c_xor(compressed),
+                        0b10 => self.c_or(compressed),
+                        0b11 => self.c_and(compressed),
+                        _ => unreachable!(),
+                    },
+                    //0b100111 is C.SUBW/C.ADDW, which is RV64 only, while 0b100100/0b100101
+                    //carry shamt[5], which must be zero for RV32C
+                    _ => Err(illegal_instruction(instr)),
+                },
+                0b101 => self.c_j(compressed),
+                0b110 => self.c_beqz(compressed),
+                0b111 => self.c_bnez(compressed),
                 _ => unreachable!(),
-            }
+            },
+            //Quadrant 2
+            0b10 => match get_compressed_func3(compressed) {
+                0b000 => match (compressed >> 12) & 1 {
+                    //shamt[5] must be zero for RV32C
+                    0 => self.c_slli(compressed),
+                    _ => Err(illegal_instruction(instr)),
+                },
+                0b010 => match get_compressed_rd(compressed) {
+                    //rd == 0 is a reserved encoding
+                    0 => Err(illegal_instruction(instr)),
+                    _ => self.c_lwsp(compressed),
+                },
+                0b100 => {
+                    let rd = get_compressed_rd(compressed);
+                    let rs2 = get_compressed_rs2(compressed);
+                    //Bit 12 splits the register form from the arithmetic form
+                    if (compressed >> 12) & 1 == 0 {
+                        match (rd, rs2) {
+                            //C.JR with rs1 == 0 is a reserved encoding
+                            (0, 0) => Err(illegal_instruction(instr)),
+                            (_, 0) => self.c_jr(compressed),
+                            _ => self.c_mv(compressed),
+                        }
+                    } else {
+                        match (rd, rs2) {
+                            (0, 0) => self.c_ebreak(compressed),
+                            (_, 0) => self.c_jalr(compressed),
+                            _ => self.c_add(compressed),
+                        }
+                    }
+                }
+                0b110 => self.c_swsp(compressed),
+                //0b001/0b011/0b101/0b111 are the F/D forms
+                _ => Err(illegal_instruction(instr)),
+            },
+            //0b11 is a 32 bit instruction and never reaches this point
+            _ => unreachable!(),
         }
     }
     fn timer_reader(&self) -> u64 {
@@ -735,7 +841,7 @@ impl CPU {
         let exception_type = TrapType::EnvironmentCallFromMMode; //TODO: Expand when adding privileges
         return Err(Trap {
             tcause: exception_type,
-            tval: self.pc,
+            tval: 0,
         });
     }
     fn ebreak(&mut self, instr: u32) -> Result<(), Trap> {
@@ -762,18 +868,15 @@ impl CPU {
             0xf13 => 0x0,                                     //mimpid
             0xf14 => 0x0,                                     //mhartid
             0xf15 => 0x0,                                     //mconfigptr
-            0x301 => 0b01_0_10000_00000000_00010001_00000001, //misa, XLEN=32, IMA+X
+            0x301 => 0b01_0_10000_00000000_00010001_00000101, //misa, XLEN=32, IMAC
 
-            0x300 => self.mstatus as u32, //mstatus
+            0x300 => self.mstatus as u32,         //mstatus
             0x310 => (self.mstatus >> 32) as u32, //mstatus
-
 
             0xC00 => self.cycle as u32,
             0xC80 => (self.cycle >> 32) as u32,
-            
 
-
-            0xC01 => self.timer_reader() as u32, //time
+            0xC01 => self.timer_reader() as u32,         //time
             0xC81 => (self.timer_reader() >> 32) as u32, //timeh
             _ => todo!("CSR {csr:0x} not implemented"),
         })
@@ -793,8 +896,14 @@ impl CPU {
             } //cycleh
             0x344 => self.mip = new_val,
             0x341 => self.mepc = new_val,
-            0x300 => { self.mstatus &= !(u32::MAX as u64); self.mstatus |= new_val as u64 }, //mstatus
-            0x310 => { self.mstatus &= u32::MAX as u64; self.mstatus |= (new_val as u64) << 32 },
+            0x300 => {
+                self.mstatus &= !(u32::MAX as u64);
+                self.mstatus |= new_val as u64
+            } //mstatus
+            0x310 => {
+                self.mstatus &= u32::MAX as u64;
+                self.mstatus |= (new_val as u64) << 32
+            }
             0x342 => self.mcause = new_val,
             0x343 => self.mtval = new_val,
             0xf11..=0xf15 => {
@@ -802,13 +911,13 @@ impl CPU {
             } //vendorId
             0x301 => {
                 return Ok(false);
-            } //misa, XLEN=32, IMA+X
+            } //misa, XLEN=32, IMAC
             _ => todo!("CSR 0x{csr:0x} not implemented"),
         };
         Ok(true)
     }
     fn sret(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("SRET is not implemented")
     }
     fn mret(&mut self, instr: u32) -> Result<(), Trap> {
         //TODO Do csr register shenenigans when implement multiple levels of priveleges.
@@ -816,7 +925,7 @@ impl CPU {
         Ok(())
     }
     fn wfi(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("WFI is not implemented")
     }
     fn csrrw(&mut self, instr: u32) -> Result<(), Trap> {
         let csr = get_csr_num(instr);
@@ -880,17 +989,17 @@ impl CPU {
             }
             self.set_x(rd, val)
         } else {
-            if !self.set_csr(csr, self.get_x(rs1))? {
+            if !self.set_csr(csr, rs1 as u32)? {
                 todo!("Handle write in read-only registers")
             }
         }
         Ok(())  
     }
     fn csrrsi(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("CSRRSI is not implemented")
     }
     fn csrrci(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("CSRRCI is not implemented")
         // Ok(())
     }
     fn mul(&mut self, instr: u32) -> Result<(), Trap> {
@@ -983,125 +1092,233 @@ impl CPU {
         let m = if rs2 != 0 {
             rs1.wrapping_rem(rs2)
         } else {
-            u32::MAX
+            rs1
         };
         self.set_x(rd, m);
         Ok(())
     }
     fn lr_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("LR.W is not implemented")
     }
     fn sc_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("SC.W is not implemented")
     }
     fn amoswap_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("AMOSWAP.W is not implemented")
     }
     fn amoadd_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("AMOADD.W is not implemented")
     }
     fn amoxor_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("AMOXOR.W is not implemented")
     }
     fn amoand_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("AMOAND.W is not implemented")
     }
     fn amoor_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("AMOOR.W is not implemented")
     }
     fn amomin_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("AMOMIN.W is not implemented")
     }
     fn amomax_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("AMOMAX.W is not implemented")
     }
     fn amominu_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("AMOMINU.W is not implemented")
     }
     fn amomaxu_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!()
+        todo!("AMOMAXU.W is not implemented")
     }
 
     fn c_addi4spn(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.ADDI4SPN is not implemented")
     }
     fn c_lw(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.LW is not implemented")
     }
     fn c_sw(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.SW is not implemented")
     }
     fn c_nop(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.NOP is not implemented")
     }
     fn c_addi(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.ADDI is not implemented")
     }
     fn c_jal(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.JAL is not implemented")
     }
     fn c_li(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.LI is not implemented")
     }
     fn c_addi16sp(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.ADDI16SP is not implemented")
     }
     fn c_lui(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.LUI is not implemented")
     }
     fn c_srli(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.SRLI is not implemented")
     }
     fn c_srai(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.SRAI is not implemented")
     }
     fn c_andi(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.ANDI is not implemented")
     }
     fn c_sub(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.SUB is not implemented")
     }
     fn c_xor(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.XOR is not implemented")
     }
     fn c_or(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.OR is not implemented")
     }
     fn c_and(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.AND is not implemented")
     }
     fn c_j(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.J is not implemented")
     }
     fn c_beqz(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.BEQZ is not implemented")
     }
     fn c_bnez(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.BNEZ is not implemented")
     }
     fn c_slli(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.SLLI is not implemented")
     }
     fn c_lwsp(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.LWSP is not implemented")
     }
     fn c_jr(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.JR is not implemented")
     }
     fn c_mv(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.MV is not implemented")
     }
     fn c_ebreak(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.EBREAK is not implemented")
     }
     fn c_jalr(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.JALR is not implemented")
     }
     fn c_add(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.ADD is not implemented")
     }
     fn c_swsp(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!()
+        todo!("C.SWSP is not implemented")
     }
-    
+}
+
+#[inline]
+fn illegal_instruction(instr: u32) -> Trap {
+    Trap {
+        tcause: TrapType::IllegalInstruction,
+        tval: instr,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        mmu::{MMU, RAM_ADDRESS, RAM_ADDRESS_END},
+        ops_decode::encode_r_type,
+    };
+
+    //Builds a CPU with `bytes` placed at `address` and the pc pointing at them.
+    fn cpu_with_bytes_at(address: u32, bytes: &[u8]) -> CPU {
+        let (mut mmu, _audio) = MMU::new();
+        for (offset, byte) in bytes.iter().enumerate() {
+            assert!(mmu.write_raw_to_ram(address + offset as u32, *byte));
+        }
+        let mut cpu = CPU::new(mmu);
+        cpu.pc = address;
+        cpu
+    }
+
+    //Builds a CPU with `bytes` placed at the start of RAM and the pc pointing at them.
+    fn cpu_with_instruction(bytes: &[u8]) -> CPU {
+        cpu_with_bytes_at(RAM_ADDRESS, bytes)
+    }
+
+    //REMU is funct3=0b111 with funct7=1, one decoding slot away from REM (funct3=0b110).
+    #[test]
+    fn remu_is_dispatched() {
+        let mut cpu =
+            cpu_with_instruction(&encode_r_type(0b0110011, 5, 0b111, 6, 7, 1).to_le_bytes());
+        let mut regs = cpu.get_registers();
+        regs[6] = 0xFFFF_FFF9; //-7
+        regs[7] = 3;
+        cpu.set_registers(regs);
+
+        cpu.execute_instruction().unwrap();
+
+        //0xFFFF_FFF9 % 3 == 0 unsigned, while -7 % 3 == -1 signed
+        assert_eq!(cpu.get_registers()[5], 0);
+        assert_eq!(cpu.pc, RAM_ADDRESS + 4);
+    }
+
+    //The instruction width lives in the two least significant bits.
+    #[test]
+    fn fetch_respects_instruction_width() {
+        //c.nop followed by 0xffff: only the first halfword belongs to the instruction
+        let mut cpu = cpu_with_instruction(&[0x01, 0x00, 0xff, 0xff]);
+        assert_eq!(cpu.fetch().unwrap(), 0x0000_0001);
+
+        //lui with the second halfword 0xffff: both halfwords belong to the instruction
+        let mut cpu = cpu_with_instruction(&[0xb7, 0x00, 0xff, 0xff]);
+        assert_eq!(cpu.fetch().unwrap(), 0xffff_00b7);
+    }
+
+    //A halfword must fit entirely inside RAM: the old word fetch panicked here instead.
+    #[test]
+    fn fetch_traps_at_the_end_of_ram() {
+        //A compressed instruction in the last byte of RAM leaves no room for its halfword
+        let mut cpu = cpu_with_bytes_at(RAM_ADDRESS_END, &[]);
+        assert_eq!(
+            cpu.fetch().unwrap_err().tcause,
+            TrapType::InstructionAccessFault
+        );
+
+        //A 32 bit instruction whose second halfword runs past the end of RAM
+        let mut cpu = cpu_with_bytes_at(RAM_ADDRESS_END - 1, &[0xb7, 0x00]);
+        assert_eq!(
+            cpu.fetch().unwrap_err().tcause,
+            TrapType::InstructionAccessFault
+        );
+    }
+
+    //0x0000 is C.ADDI4SPN with nzuimm == 0, 0x6101 is C.ADDI16SP with nzimm == 0, 0x6081 is
+    //C.LUI with nzimm == 0, 0x4002 is C.LWSP with rd == 0, 0x1002 is C.SLLI with shamt[5] set
+    //and 0x8002 is C.JR with rs1 == 0; all of them are reserved encodings. Getting an illegal
+    //instruction trap (instead of an unimplemented panic) proves the 16 bit path is reached.
+    #[test]
+    fn compressed_reserved_encoding_traps() {
+        for encoding in [0x0000u16, 0x6101, 0x6081, 0x4002, 0x1002, 0x8002] {
+            let mut cpu = cpu_with_instruction(&encoding.to_le_bytes());
+            let trap = cpu.execute_instruction().unwrap_err();
+            assert_eq!(
+                trap.tcause,
+                TrapType::IllegalInstruction,
+                "encoding 0x{encoding:04x} should be reserved"
+            );
+            //A trap is raised before the pc is advanced
+            assert_eq!(cpu.pc, RAM_ADDRESS);
+        }
+    }
+
+    //C.ANDI carries imm[5] in bit 12, so the negative immediates must not be mistaken for
+    //reserved encodings.
+    #[test]
+    #[should_panic(expected = "C.ANDI is not implemented")]
+    fn c_andi_accepts_negative_immediates() {
+        //c.andi a0,-1
+        let mut cpu = cpu_with_instruction(&0x997du16.to_le_bytes());
+        let _ = cpu.execute_instruction();
+    }
 }

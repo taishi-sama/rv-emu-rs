@@ -1,7 +1,7 @@
 # What is it.
 My small personal project targeted to write RISC-V emulator with decent accuracy.
 
-Current target instruction set is rv32ima(unfinished), have plans to implement virtual memory, user mode and etc.
+Current target instruction set is rv32imac(unfinished), have plans to implement virtual memory, user mode and etc.
 
 
 Devices list contains only write-only simple UART device and write-only audio device with fixed rate and format. Will be extended in the future.

@@ -1,3 +1,3 @@
 pub struct CodeDisplay {
-    lines: Vec<String>
+    lines: Vec<String>,
 }

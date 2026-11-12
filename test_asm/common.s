@@ -2,16 +2,21 @@
 
 sent_to_uart:
     addi sp, sp, -4; # sp = sp + -4
-    sw ra, 4(sp)
+    sw ra, 0(sp)
 
     li ra, 0x10000000 # ra = 0x10000000
     sb a0, 0(ra) # Send to UART 
 
-    lw ra, 4(sp) #     
+    lw ra, 0(sp) #     
     addi sp, sp, 4; # sp = sp + 4
     ret
 
 stop_by_fault:
+    li a0, 'z'
+    call sent_to_uart
+    li a0, 0
+    call sent_to_uart
+    csrw mtvec, zero
     li a0, 0x0
     lw x0, 0(a0)
 
@@ -88,6 +93,48 @@ test_\test_num:
     \instr a1, a2, 1b
     fail \test_num 
 3:  nop
+.endm
+
+.macro test_case test_num, check_reg, result
+test_\test_num:
+    li t6, \result
+    beq \check_reg, t6, 1f
+    fail \test_num
+    j 2f
+1:
+    pass \test_num
+2:
+    nop
+.endm
+
+.macro test_ld_op test_num, instr, result, offset, symbol
+test_\test_num:
+    la t2, \symbol
+    li t6, \result
+    \instr t0, \offset(t2)
+    beq t0, t6, 1f
+    fail \test_num
+    j 2f
+1:
+    pass \test_num
+2:
+    nop
+.endm
+
+.macro test_st_op test_num, ld_instr, st_instr, value, result, offset, symbol
+test_\test_num:
+    la t2, \symbol
+    li t1, \value
+    li t6, \result
+    \st_instr t1, \offset(t2)
+    \ld_instr t0, \offset(t2)
+    beq t0, t6, 1f
+    fail \test_num
+    j 2f
+1:
+    pass \test_num
+2:
+    nop
 .endm
 
 .macro test_br2_op_nottaken test_num, instr, val1, val2
