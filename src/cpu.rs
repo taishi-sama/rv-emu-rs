@@ -57,6 +57,10 @@ pub struct CPUState {
     pub pmpaddr: [u32; 16],
     pub privilege: PrivilegeMode,
     pub wfi: bool,
+    //Set when the last check saw an enabled interrupt this CPU can deliver. `step` checks it
+    //after each instruction so enabling mstatus.MIE inside a device-update batch still takes
+    //the trap.
+    pub interrupt_pending: bool,
     //Address of the word reserved by LR.W, accepted by SC.W afterwards.
     pub reservation_slot: Option<u32>,
     pub stopflag: Option<Arc<AtomicBool>>,
@@ -85,14 +89,22 @@ impl CPU {
         Ok(instr)
     }
     pub fn step(&mut self) -> Result<u32, EmulatorError> {
-        //Waking from WFI and taking the interrupt happen together in handle_clint, which runs
-        //before every step. A halted hart simply retires nothing.
+        //Waking from WFI and taking the boundary-polled interrupt happen in handle_clint; step
+        //also re-checks the latch after each instruction so an interrupt enabled mid-batch is
+        //taken immediately. A halted hart simply retires nothing.
         if self.state.wfi {
             return Ok(0);
         }
         let res = self.execute_instruction();
         match res {
-            Ok(v) => return Ok(v),
+            Ok(v) => {
+                //A pending interrupt must be taken as soon as MIE becomes set, not only at the
+                //next host poll; the guest can enable and disable MIE inside one batch.
+                if self.state.interrupt_pending && self.state.mstatus as u32 & MSTATUS_MIE != 0 {
+                    self.handle_clint()?;
+                }
+                return Ok(v);
+            }
             Err(t) => {
                 self.state.process_trap(t)?;
                 return Ok(0);
@@ -102,6 +114,7 @@ impl CPU {
     //Wake the hart from WFI and deliver a pending machine timer interrupt.
     pub fn handle_clint(&mut self) -> Result<(), EmulatorError> {
         let pending = Self::pending_mip(&self.state, &mut self.mmu);
+        self.state.interrupt_pending = self.state.mie & pending & MIE_MTIE != 0;
         //WFI wakes on any locally enabled interrupt, even when mstatus.MIE is clear.
         if self.state.wfi && self.state.mie & pending != 0 {
             self.state.wfi = false;
@@ -1433,6 +1446,7 @@ impl CPUState {
             pmpaddr: [0; 16],
             privilege: PrivilegeMode::Machine,
             wfi: false,
+            interrupt_pending: false,
             reservation_slot: None,
             stopflag: None,
         }

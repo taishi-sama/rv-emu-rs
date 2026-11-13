@@ -91,7 +91,7 @@ fn main() {
         Some(rx)
     };
     let mut counter: u128 = 1;
-    //Execute batch of instructions 
+    //Execute batch of instructions
     const DEVICE_UPDATE_INTERVAL: usize = 16;
     let step_batch = if display { 1 } else { DEVICE_UPDATE_INTERVAL };
     loop {
@@ -114,7 +114,7 @@ fn main() {
         for _ in 0..step_batch {
             //WFI means the hart retires nothing; go back to handle_clint immediately instead of
             //burning the rest of the batch on no-op steps.
-            
+
             if emu.cpu.state.wfi {
                 break;
             }
