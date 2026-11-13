@@ -7,7 +7,7 @@ use core::{fmt::{self, Write}, panic::PanicInfo};
 use alloc::vec::Vec;
 use embedded_alloc::LlffHeap as Heap;
 
-use riscv::{asm::delay, interrupt::Exception};
+use riscv::{asm::wfi, interrupt::Exception};
 use riscv_rt::{core_interrupt, exception};
 
 extern "C" {
@@ -49,14 +49,21 @@ fn main() -> ! {
 
     let mut uart = UART::new();
     let audio = Audio::new();
-    //let my_str = "";
-    let mut curr_time = riscv::register::time::read64();
     const MICROS: u64 = ((1.0 / TARGET_FPS as f64) * 1_000_000.0) as u64; 
     let total_samples_len = AUDIO_STREAM.len() as u32 / 2;
     let mut buff_iter = 0u32;
+
+    //MTIE lets WFI wake on the timer; mstatus.MIE stays clear so no trap is taken.
+    unsafe {
+        riscv::register::mstatus::clear_mie();
+        riscv::register::mie::set_mtimer();
+    }
+    let mut deadline = riscv::register::time::read64();
+
     for (i, s) in VIDEO_STREAM.split("SPLIT").enumerate(){
         // v.push(10);
-        writeln!(uart, "{}, {} microseconds; Audio: {}/{}({:3.2}%) samples;", i, curr_time, buff_iter, total_samples_len, (buff_iter as f32) / (total_samples_len as f32) * 100.0).unwrap();
+        let now = riscv::register::time::read64();
+        writeln!(uart, "{}, {} microseconds; Audio: {}/{}({:3.2}%) samples;", i, now, buff_iter, total_samples_len, (buff_iter as f32) / (total_samples_len as f32) * 100.0).unwrap();
         writeln!(uart, "{}", s).unwrap();
         {
             let len = audio.read_len();
@@ -72,16 +79,21 @@ fn main() -> ! {
                 buff_iter = buff_iter.wrapping_add(1);
             }
         }
-        while riscv::register::time::read64() - curr_time < MICROS {
-            delay(100);
+        //Deadline based, so a slow frame does not shift the schedule.
+        deadline = deadline.wrapping_add(MICROS);
+        unsafe { set_mtimecmp(deadline) };
+        //WFI wakes once MTIP is pending; an already-missed deadline returns immediately.
+        while riscv::register::time::read64() < deadline {
+            wfi();
         }
-        curr_time = riscv::register::time::read64();
         // if v.len() > 10000 {
             // v.clear();
         // }
         //riscv::asm::delay(10000000);
     }
-    writeln!(uart, "FIN").unwrap();   
+    writeln!(uart, "FIN").unwrap();
+    //No pending timer should be able to trap if a future change enables global interrupts.
+    unsafe { riscv::register::mie::clear_mtimer() };
     loop {
         
     }
@@ -96,6 +108,21 @@ fn main() -> ! {
 //}
 
 const AUDIO_LOCATION: u32 = 0x10000200;
+
+const CLINT_BASE: usize = 0x1100_0000;
+const MTIMECMP_LOW: usize = CLINT_BASE + 0x4000;
+const MTIMECMP_HIGH: usize = CLINT_BASE + 0x4004;
+
+//Programs the next timer deadline. The high word is disarmed first so a carry into it cannot
+//produce a transient compare value below mtime.
+unsafe fn set_mtimecmp(deadline: u64) {
+    let low = deadline as u32;
+    let high = (deadline >> 32) as u32;
+    (MTIMECMP_HIGH as *mut u32).write_volatile(u32::MAX);
+    (MTIMECMP_LOW as *mut u32).write_volatile(low);
+    (MTIMECMP_HIGH as *mut u32).write_volatile(high);
+}
+
 struct Audio {} 
 impl Audio {
     pub fn new() -> Self {
