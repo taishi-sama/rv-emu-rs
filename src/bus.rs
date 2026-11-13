@@ -3,7 +3,7 @@ use crate::{
     primitive_audio::{self, PrimitiveAudioProducer, PrimitiveAudioReceiver},
     syscon::{Syscon, SYSCON_ADDRESS, SYSCON_ADDRESS_END},
     traps::{Trap, TrapType},
-    uart::UART,
+    uart::{UART, UART_ADDRESS, UART_ADDRESS_END},
 };
 
 pub const RAM_SIZE: usize = 64 * 1024 * 1024;
@@ -11,9 +11,6 @@ pub const RAM_SIZE: usize = 64 * 1024 * 1024;
 pub const RAM_ADDRESS: u32 = 0x80000000;
 pub const RAM_ADDRESS_END: u32 = RAM_ADDRESS + RAM_SIZE as u32 - 1;
 
-pub const UART_REGION_SIZE: usize = 0x100;
-pub const UART_ADDRESS: u32 = 0x10000000;
-pub const UART_ADDRESS_END: u32 = 0x10000000 + UART_REGION_SIZE as u32 - 1;
 pub const PRIMITIVE_AUDIO_ADDRESS: u32 = 0x10000200;
 
 //Selects the fault type an atomic access reports: LR.W faults as a load, SC.W and AMOs as stores.
@@ -59,9 +56,10 @@ impl MemoryBus {
                 })?;
                 Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
             }
-            UART_ADDRESS..=UART_ADDRESS_END => {
-                todo!("Instruction fetch from the UART is not implemented")
-            }
+            UART_ADDRESS..=UART_ADDRESS_END => Err(Trap {
+                tcause: TrapType::InstructionAccessFault,
+                tval: address,
+            }),
             PRIMITIVE_AUDIO_ADDRESS => {
                 todo!("Instruction fetch from the audio device is not implemented")
             }
@@ -82,9 +80,17 @@ impl MemoryBus {
                 tval: address,
             });
         }
-        if matches!(address, UART_ADDRESS..=UART_ADDRESS_END) || address == PRIMITIVE_AUDIO_ADDRESS
-        {
-            todo!("Atomic access to MMIO address 0x{address:x} is not implemented");
+        if matches!(address, UART_ADDRESS..=UART_ADDRESS_END) {
+            return Err(Trap {
+                tcause: match access {
+                    AtomicAccess::Load => TrapType::LoadAccessFault,
+                    AtomicAccess::Store => TrapType::StoreAccessFault,
+                },
+                tval: address,
+            });
+        }
+        if address == PRIMITIVE_AUDIO_ADDRESS {
+            todo!("Atomic access to the audio device is not implemented");
         }
         if !matches!(address, RAM_ADDRESS..=RAM_ADDRESS_END) {
             return Err(Trap {
@@ -118,9 +124,10 @@ impl MemoryBus {
                 })?;
                 Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
             }
-            UART_ADDRESS..=UART_ADDRESS_END => {
-                todo!("UART word reads are not implemented")
-            }
+            UART_ADDRESS..=UART_ADDRESS_END => Err(Trap {
+                tcause: TrapType::LoadAccessFault,
+                tval: address,
+            }),
             PRIMITIVE_AUDIO_ADDRESS => Ok(self.audio.get_size()),
             CLINT_ADDRESS..=CLINT_ADDRESS_END => self.clint.read_word(address),
             SYSCON_ADDRESS..=SYSCON_ADDRESS_END => self.syscon.read_word(address),
@@ -140,9 +147,10 @@ impl MemoryBus {
                 })?;
                 Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
             }
-            UART_ADDRESS..=UART_ADDRESS_END => {
-                todo!("UART halfword reads are not implemented")
-            }
+            UART_ADDRESS..=UART_ADDRESS_END => Err(Trap {
+                tcause: TrapType::LoadAccessFault,
+                tval: address,
+            }),
             PRIMITIVE_AUDIO_ADDRESS => {
                 todo!("Audio halfword reads are not implemented")
             }
@@ -152,12 +160,10 @@ impl MemoryBus {
             }),
         }
     }
-    pub fn read_byte(&self, address: u32) -> Result<u8, Trap> {
+    pub fn read_byte(&mut self, address: u32) -> Result<u8, Trap> {
         match address {
             RAM_ADDRESS..=RAM_ADDRESS_END => Ok(self.ram[(address - RAM_ADDRESS) as usize]),
-            UART_ADDRESS..=UART_ADDRESS_END => {
-                todo!("UART byte reads are not implemented")
-            }
+            UART_ADDRESS..=UART_ADDRESS_END => self.uart.read_byte(address),
             PRIMITIVE_AUDIO_ADDRESS => {
                 todo!("Audio byte reads are not implemented")
             }
@@ -178,9 +184,10 @@ impl MemoryBus {
                 bytes.copy_from_slice(&word.to_le_bytes());
                 Ok(())
             }
-            UART_ADDRESS..=UART_ADDRESS_END => {
-                todo!("UART word writes are not implemented")
-            }
+            UART_ADDRESS..=UART_ADDRESS_END => Err(Trap {
+                tcause: TrapType::StoreAccessFault,
+                tval: address,
+            }),
             PRIMITIVE_AUDIO_ADDRESS => {
                 todo!("Audio word writes are not implemented")
             }
@@ -203,9 +210,10 @@ impl MemoryBus {
                 bytes.copy_from_slice(&halfword.to_le_bytes());
                 Ok(())
             }
-            UART_ADDRESS..=UART_ADDRESS_END => {
-                todo!("UART halfword writes are not implemented")
-            }
+            UART_ADDRESS..=UART_ADDRESS_END => Err(Trap {
+                tcause: TrapType::StoreAccessFault,
+                tval: address,
+            }),
             PRIMITIVE_AUDIO_ADDRESS => Ok(self.audio.write(halfword as i16)),
             _ => Err(Trap {
                 tcause: TrapType::StoreAccessFault,
@@ -219,14 +227,7 @@ impl MemoryBus {
                 self.ram[(address - RAM_ADDRESS) as usize] = byte;
                 Ok(())
             }
-            UART_ADDRESS => {
-                //println!("Writing 0x{:02x} to UART", byte);
-                self.uart.emu_push(byte);
-                Ok(())
-            }
-            UART_ADDRESS..=UART_ADDRESS_END => {
-                todo!("UART writes to registers above the transmit register are not implemented")
-            }
+            UART_ADDRESS..=UART_ADDRESS_END => self.uart.write_byte(address, byte),
             PRIMITIVE_AUDIO_ADDRESS => {
                 todo!("Audio byte writes are not implemented")
             }

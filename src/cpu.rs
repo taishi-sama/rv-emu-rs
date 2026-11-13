@@ -51,6 +51,9 @@ pub struct CPUState {
     pub mepc: u32,
     pub mtval: u32,
     pub mcause: u32,
+    //PMP configuration and address registers. The values are stored but not enforced yet.
+    pub pmpcfg: [u32; 4],
+    pub pmpaddr: [u32; 16],
     pub privilege: PrivilegeMode,
     pub wfi: bool,
     //Address of the word reserved by LR.W, accepted by SC.W afterwards.
@@ -780,7 +783,11 @@ impl CPU {
         Ok(())
     }
     fn ecall(state: &mut CPUState, instr: u32) -> Result<(), Trap> {
-        let exception_type = TrapType::EnvironmentCallFromMMode; //TODO: Expand when adding privileges
+        let exception_type = match state.privilege {
+            PrivilegeMode::User => TrapType::EnvironmentCallFromUMode,
+            PrivilegeMode::Supervisor => TrapType::EnvironmentCallFromSMode,
+            PrivilegeMode::Machine | PrivilegeMode::Reserved => TrapType::EnvironmentCallFromMMode,
+        };
         return Err(Trap {
             tcause: exception_type,
             tval: 0,
@@ -816,6 +823,8 @@ impl CPU {
             0x341 => state.mepc,
             0x342 => state.mcause,
             0x343 => state.mtval,
+            0x3a0..=0x3a3 => state.pmpcfg[(csr - 0x3a0) as usize],
+            0x3b0..=0x3bf => state.pmpaddr[(csr - 0x3b0) as usize],
             0xf11 => 0xff0ff0ff,                              //vendorId
             0xf12 => 0x0,                                     //marchid
             0xf13 => 0x0,                                     //mimpid
@@ -849,6 +858,8 @@ impl CPU {
             } //cycleh
             0x344 => state.mip = new_val & !0b1000_1000, //MSIP and MTIP are CLINT-driven
             0x341 => state.mepc = new_val,
+            0x3a0..=0x3a3 => state.pmpcfg[(csr - 0x3a0) as usize] = new_val,
+            0x3b0..=0x3bf => state.pmpaddr[(csr - 0x3b0) as usize] = new_val,
             0x300 => {
                 state.mstatus &= !(u32::MAX as u64);
                 state.mstatus |= new_val as u64
@@ -1417,6 +1428,8 @@ impl CPUState {
             mepc: 0,
             mtval: 0,
             mcause: 0,
+            pmpcfg: [0; 4],
+            pmpaddr: [0; 16],
             privilege: PrivilegeMode::Machine,
             wfi: false,
             reservation_slot: None,
@@ -1431,7 +1444,7 @@ impl CPUState {
         self.x = regs
     }
     #[inline(always)]
-    fn set_x(&mut self, x: u8, val: u32) {
+    pub(crate) fn set_x(&mut self, x: u8, val: u32) {
         if x != 0 {
             self.x[x as usize] = val;
         }

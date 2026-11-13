@@ -1,7 +1,9 @@
 use std::{
     env,
     fs::File,
-    io::{self, Read},
+    io::{self, Read, Write},
+    sync::mpsc,
+    thread,
 };
 
 use bus::MemoryBus;
@@ -35,14 +37,24 @@ fn main() {
         path = p
     }
     let (_stream, stream_handle) = OutputStream::try_default().unwrap();
-    println!("Loading elf \"{}\"", path);
-    let mut elf_file = File::open(path).unwrap();
-    let mut elf_contents = vec![];
-    elf_file.read_to_end(&mut elf_contents).unwrap();
+    let dtb_path = env::args().nth(2);
+    let mut image_file = File::open(&path).unwrap();
+    let mut contents = vec![];
+    image_file.read_to_end(&mut contents).unwrap();
 
     let (bus, audio) = MemoryBus::new();
     stream_handle.play_raw(audio.convert_samples()).unwrap();
-    let mut emu = emulator::Emulator::from_elf(elf_contents, MMU::new(bus));
+    let mut emu = if contents.starts_with(b"\x7fELF") {
+        println!("Loading elf \"{path}\"");
+        emulator::Emulator::from_elf(contents, MMU::new(bus))
+    } else {
+        //A flat kernel Image; the device tree defaults to the one built from rv-emu-rs.dts.
+        let dtb_path = dtb_path.unwrap_or_else(|| "rv-emu-rs.dtb".to_string());
+        println!("Loading image \"{path}\" with dtb \"{dtb_path}\"");
+        let dtb = std::fs::read(&dtb_path)
+            .unwrap_or_else(|err| panic!("could not read the device tree \"{dtb_path}\": {err}"));
+        emulator::Emulator::from_image(contents, dtb, MMU::new(bus))
+    };
     let mut stdin = io::stdin();
     println!("Start executing...");
     let reg_names = [
@@ -52,6 +64,30 @@ fn main() {
     ];
 
     let display = false;
+    //Feed stdin into the guest's UART receive buffer while running normally. In display
+    //(single-step) mode stdin is used for stepping instead.
+    let uart_input = if display {
+        None
+    } else {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut stdin = io::stdin();
+            let mut byte = [0u8; 1];
+            loop {
+                match stdin.read(&mut byte) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if tx.send(byte[0]).is_err() {
+                            break;
+                        }
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+        Some(rx)
+    };
     let mut counter: u128 = 1;
     loop {
         //let display = true;
@@ -60,13 +96,23 @@ fn main() {
             println!("pc: {:0>8x}", pc);
             let _ = stdin.read(&mut [0u8]).unwrap();
         }
+        if let Some(input) = &uart_input {
+            while let Ok(byte) = input.try_recv() {
+                emu.cpu.mmu.bus.uart.host_push(byte);
+            }
+        }
         if let Err(err) = emu.cpu.handle_clint() {
             println!("Encountered error! {err:?}");
             break;
         }
         let res = emu.cpu.step();
+        let mut wrote = false;
         while let Some(x) = emu.cpu.mmu.bus.uart.try_get_byte() {
-            print!("{}", x as char)
+            print!("{}", x as char);
+            wrote = true;
+        }
+        if wrote {
+            let _ = io::stdout().flush();
         }
         match res {
             Ok(instr) => {
