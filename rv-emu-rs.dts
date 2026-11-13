@@ -3,14 +3,15 @@
 /*
  * Device tree for rv-emu-rs, modelled on mini-rv32ima's sixtyfourmb.dts.
  *
- * Implemented memory map (src/mmu.rs, src/uart.rs, src/primitive_audio.rs):
+ * Implemented memory map (src/bus.rs, src/clint.rs, src/uart.rs,
+ * src/primitive_audio.rs):
  *   0x10000000  UART, write-only transmit byte at offset 0
  *   0x10000200  audio, i16 samples written as halfwords
+ *   0x11000000  CLINT: msip at offset 0x0, mtimecmp at 0x4000, mtime at 0xbff8
  *   0x80000000  64 MiB of RAM
  *
- * The CLINT and the syscon used for poweroff/reboot are present but disabled,
- * because the MMU does not map those addresses yet. Drop the status property
- * once they exist.
+ * The syscon used for poweroff/reboot is present but disabled, because the
+ * bus does not decode that address yet. Drop the status property once it does.
  *
  * Build with: dtc -I dts -O dtb -o rv-emu-rs.dtb rv-emu-rs.dts
  */
@@ -34,7 +35,7 @@
 		#address-cells = <0x01>;
 		#size-cells = <0x00>;
 
-		/* time_reader() counts microseconds */
+		/* Clint::mtime() counts microseconds */
 		timebase-frequency = <0xf4240>;
 
 		cpu0: cpu@0 {
@@ -86,7 +87,6 @@
 		};
 
 		clint@11000000 {
-			status = "disabled";
 			interrupts-extended = <&cpu_intc 0x03 &cpu_intc 0x07>;
 			reg = <0x00 0x11000000 0x00 0x10000>;
 			compatible = "sifive,clint0", "riscv,clint0";

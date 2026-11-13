@@ -4,9 +4,12 @@ use std::{
     io::{self, Read},
 };
 
+use bus::MemoryBus;
 use mmu::MMU;
 use rodio::{OutputStream, Source};
 
+pub mod bus;
+pub mod clint;
 pub mod cpu;
 pub mod elf_analyzer;
 pub mod emulator;
@@ -35,9 +38,9 @@ fn main() {
     let mut elf_contents = vec![];
     elf_file.read_to_end(&mut elf_contents).unwrap();
 
-    let (mmu, audio) = MMU::new();
+    let (bus, audio) = MemoryBus::new();
     stream_handle.play_raw(audio.convert_samples()).unwrap();
-    let mut emu = emulator::Emulator::from_elf(elf_contents, mmu);
+    let mut emu = emulator::Emulator::from_elf(elf_contents, MMU::new(bus));
     let mut stdin = io::stdin();
     println!("Start executing...");
     let reg_names = [
@@ -50,13 +53,17 @@ fn main() {
     let mut counter: u128 = 1;
     loop {
         //let display = true;
-        let pc = emu.cpu.pc;
+        let pc = emu.cpu.state.pc;
         if display {
             println!("pc: {:0>8x}", pc);
             let _ = stdin.read(&mut [0u8]).unwrap();
         }
+        if let Err(err) = emu.cpu.handle_clint() {
+            println!("Encountered error! {err:?}");
+            break;
+        }
         let res = emu.cpu.step();
-        while let Some(x) = emu.cpu.mmu.uart.try_get_byte() {
+        while let Some(x) = emu.cpu.mmu.bus.uart.try_get_byte() {
             print!("{}", x as char)
         }
         match res {
@@ -66,7 +73,7 @@ fn main() {
                         "Executed instruction 0x{:0>8x} on address {:x}; instruction no {}",
                         instr, pc, counter
                     );
-                    for (ind, x) in emu.cpu.get_registers().into_iter().enumerate() {
+                    for (ind, x) in emu.cpu.state.get_registers().into_iter().enumerate() {
                         let reg_name = reg_names[ind];
                         print!("{reg_name:<3}: {:^10x}; ", x);
                         if ind % 8 == 7 && ind != 0 {
@@ -91,7 +98,7 @@ fn main() {
     }
     println!("UART output buffer:");
     let mut v = vec![];
-    while let Some(x) = emu.cpu.mmu.uart.try_get_byte() {
+    while let Some(x) = emu.cpu.mmu.bus.uart.try_get_byte() {
         //print!("{}", x as char)
         v.push(x)
     }
@@ -106,7 +113,7 @@ fn main() {
 mod test {
     use std::{fs::File, io::Read, path::PathBuf, process::Command, sync::OnceLock};
 
-    use crate::{emulator, mmu::MMU};
+    use crate::{bus::MemoryBus, emulator, mmu::MMU};
 
     const MAX_STEPS: usize = 10_000_000;
     const END_MARKER: [u8; 2] = [b'z', 0];
@@ -145,15 +152,24 @@ mod test {
         let mut elf_contents = Vec::new();
         File::open(&path)
             .unwrap_or_else(|err| {
-                panic!("cannot open {}: {err}; run test_asm/build.sh", path.display())
+                panic!(
+                    "cannot open {}: {err}; run test_asm/build.sh",
+                    path.display()
+                )
             })
             .read_to_end(&mut elf_contents)
             .unwrap();
 
-        let (mmu, _audio) = MMU::new();
-        let mut emu = emulator::Emulator::from_elf(elf_contents, mmu);
+        let (bus, _audio) = MemoryBus::new();
+        let mut emu = emulator::Emulator::from_elf(elf_contents, MMU::new(bus));
         let mut steps = 0;
-        while steps < MAX_STEPS && emu.cpu.step().is_ok() {
+        while steps < MAX_STEPS {
+            if emu.cpu.handle_clint().is_err() {
+                break;
+            }
+            if emu.cpu.step().is_err() {
+                break;
+            }
             steps += 1;
         }
         assert!(
@@ -162,7 +178,7 @@ mod test {
             path.display()
         );
 
-        let output: Vec<u8> = std::iter::from_fn(|| emu.cpu.mmu.uart.try_get_byte()).collect();
+        let output: Vec<u8> = std::iter::from_fn(|| emu.cpu.mmu.bus.uart.try_get_byte()).collect();
         let preview = &output[..output.len().min(64)];
         assert!(
             output.ends_with(&END_MARKER),

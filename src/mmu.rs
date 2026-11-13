@@ -1,241 +1,58 @@
 use crate::{
-    primitive_audio::{self, PrimitiveAudioProducer, PrimitiveAudioReceiver},
+    bus::{AtomicAccess, MemoryBus},
     traps::Trap,
-    uart::UART,
 };
 
-pub const RAM_SIZE: usize = 64 * 1024 * 1024;
-
-pub const RAM_ADDRESS: u32 = 0x80000000;
-pub const RAM_ADDRESS_END: u32 = RAM_ADDRESS + RAM_SIZE as u32 - 1;
-
-pub const UART_REGION_SIZE: usize = 0x100;
-pub const UART_ADDRESS: u32 = 0x10000000;
-pub const UART_ADDRESS_END: u32 = 0x10000000 + UART_REGION_SIZE as u32 - 1;
-pub const PRIMITIVE_AUDIO_ADDRESS: u32 = 0x10000200;
-
-//Selects the fault type an atomic access reports: LR.W faults as a load, SC.W and AMOs as stores.
-#[derive(Clone, Copy)]
-pub enum AtomicAccess {
-    Load,
-    Store,
-}
-
+// Future place for properly implementing memory translation(Sv32), currently it is just flat map for all modes.
 pub struct MMU {
-    memory: Box<[u8]>,
-    pub uart: UART,
-    pub audio: PrimitiveAudioReceiver,
+    pub bus: MemoryBus,
 }
 
 impl MMU {
-    pub fn new() -> (Self, PrimitiveAudioProducer) {
-        let v = vec![0; RAM_SIZE];
-        let (audio_res, audio_prod) = primitive_audio::create_primitive_audio_pair();
-        (
-            MMU {
-                memory: v.into(),
-                uart: UART::new(),
-                audio: audio_res,
-            },
-            audio_prod,
-        )
+    pub fn new(bus: MemoryBus) -> Self {
+        MMU { bus }
     }
-    // Need to implement only fetch 16 bits of instructions, CPU will fetch upper 16 bits for normal instructions after it decodes length.
-    pub fn fetch_halfword(&self, address: u32) -> Result<u16, Trap> {
-        match address {
-            RAM_ADDRESS..=RAM_ADDRESS_END => {
-                let mem_adr = (address - RAM_ADDRESS) as usize;
-                let bytes = self.memory.get(mem_adr..mem_adr + 2).ok_or(Trap {
-                    tcause: crate::traps::TrapType::InstructionAccessFault,
-                    tval: address,
-                })?;
-                Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
-            }
-            UART_ADDRESS..=UART_ADDRESS_END => {
-                todo!("Instruction fetch from the UART is not implemented")
-            }
-            PRIMITIVE_AUDIO_ADDRESS => {
-                todo!("Instruction fetch from the audio device is not implemented")
-            }
-            _ => Err(Trap {
-                tcause: crate::traps::TrapType::InstructionAccessFault,
-                tval: address,
-            }),
-        }
+    //The core's view of the CLINT, which is a shared device on the bus.
+    pub fn mtime(&mut self) -> u64 {
+        self.bus.clint.mtime()
     }
-    //Atomic accesses only exist for RAM words: MMIO devices are not atomically addressable.
-    fn atomic_word_offset(address: u32, access: AtomicAccess) -> Result<usize, Trap> {
-        if address & 0b11 != 0 {
-            return Err(Trap {
-                tcause: match access {
-                    AtomicAccess::Load => crate::traps::TrapType::LoadAddressMisaligned,
-                    AtomicAccess::Store => crate::traps::TrapType::StoreAddressMisaligned,
-                },
-                tval: address,
-            });
-        }
-        if matches!(address, UART_ADDRESS..=UART_ADDRESS_END) || address == PRIMITIVE_AUDIO_ADDRESS {
-            todo!("Atomic access to MMIO address 0x{address:x} is not implemented");
-        }
-        if !matches!(address, RAM_ADDRESS..=RAM_ADDRESS_END) {
-            return Err(Trap {
-                tcause: match access {
-                    AtomicAccess::Load => crate::traps::TrapType::LoadAccessFault,
-                    AtomicAccess::Store => crate::traps::TrapType::StoreAccessFault,
-                },
-                tval: address,
-            });
-        }
-        Ok((address - RAM_ADDRESS) as usize)
+    pub fn msip(&mut self) -> bool {
+        self.bus.clint.msip()
     }
-    pub fn read_word_atomically(&self, address: u32, access: AtomicAccess) -> Result<u32, Trap> {
-        let mem_adr = Self::atomic_word_offset(address, access)?;
-        Ok(u32::from_le_bytes(
-            self.memory[mem_adr..mem_adr + 4].try_into().unwrap(),
-        ))
+    pub fn mtip(&mut self) -> bool {
+        self.bus.clint.mtip()
+    }
+    pub fn fetch_halfword(&mut self, address: u32) -> Result<u16, Trap> {
+        self.bus.fetch_halfword(address)
+    }
+    //Reads also take &mut self so that translation caches (e.g. a TLB) can be added later
+    //without changing the callers.
+    pub fn read_word_atomically(
+        &mut self,
+        address: u32,
+        access: AtomicAccess,
+    ) -> Result<u32, Trap> {
+        self.bus.read_word_atomically(address, access)
     }
     pub fn write_word_atomically(&mut self, address: u32, word: u32) -> Result<(), Trap> {
-        let mem_adr = Self::atomic_word_offset(address, AtomicAccess::Store)?;
-        self.memory[mem_adr..mem_adr + 4].copy_from_slice(&word.to_le_bytes());
-        Ok(())
+        self.bus.write_word_atomically(address, word)
     }
-    pub fn read_word(&self, address: u32) -> Result<u32, Trap> {
-        match address {
-            RAM_ADDRESS..=RAM_ADDRESS_END => {
-                let mem_adr = (address - RAM_ADDRESS) as usize;
-                let bytes = self.memory.get(mem_adr..mem_adr + 4).ok_or(Trap {
-                    tcause: crate::traps::TrapType::LoadAccessFault,
-                    tval: address,
-                })?;
-                Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
-            }
-            UART_ADDRESS..=UART_ADDRESS_END => {
-                todo!("UART word reads are not implemented")
-            }
-            PRIMITIVE_AUDIO_ADDRESS => Ok(self.audio.get_size()),
-            _ => Err(Trap {
-                tcause: crate::traps::TrapType::LoadAccessFault,
-                tval: address,
-            }),
-        }
+    pub fn read_word(&mut self, address: u32) -> Result<u32, Trap> {
+        self.bus.read_word(address)
     }
-    pub fn read_halfword(&self, address: u32) -> Result<u16, Trap> {
-        match address {
-            RAM_ADDRESS..=RAM_ADDRESS_END => {
-                let mem_adr = (address - RAM_ADDRESS) as usize;
-                let bytes = self.memory.get(mem_adr..mem_adr + 2).ok_or(Trap {
-                    tcause: crate::traps::TrapType::LoadAccessFault,
-                    tval: address,
-                })?;
-                Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
-            }
-            UART_ADDRESS..=UART_ADDRESS_END => {
-                todo!("UART halfword reads are not implemented")
-            }
-            PRIMITIVE_AUDIO_ADDRESS => {
-                todo!("Audio halfword reads are not implemented")
-            }
-            _ => Err(Trap {
-                tcause: crate::traps::TrapType::LoadAccessFault,
-                tval: address,
-            }),
-        }
+    pub fn read_halfword(&mut self, address: u32) -> Result<u16, Trap> {
+        self.bus.read_halfword(address)
     }
-    pub fn read_byte(&self, address: u32) -> Result<u8, Trap> {
-        match address {
-            RAM_ADDRESS..=RAM_ADDRESS_END => Ok(self.memory[(address - RAM_ADDRESS) as usize]),
-            UART_ADDRESS..=UART_ADDRESS_END => {
-                todo!("UART byte reads are not implemented")
-            }
-            PRIMITIVE_AUDIO_ADDRESS => {
-                todo!("Audio byte reads are not implemented")
-            }
-            _ => Err(Trap {
-                tcause: crate::traps::TrapType::LoadAccessFault,
-                tval: address,
-            }),
-        }
+    pub fn read_byte(&mut self, address: u32) -> Result<u8, Trap> {
+        self.bus.read_byte(address)
     }
     pub fn write_word(&mut self, address: u32, word: u32) -> Result<(), Trap> {
-        match address {
-            RAM_ADDRESS..=RAM_ADDRESS_END => {
-                let mem_adr = (address - RAM_ADDRESS) as usize;
-                let bytes = self.memory.get_mut(mem_adr..mem_adr + 4).ok_or(Trap {
-                    tcause: crate::traps::TrapType::StoreAccessFault,
-                    tval: address,
-                })?;
-                bytes.copy_from_slice(&word.to_le_bytes());
-                Ok(())
-            }
-            UART_ADDRESS..=UART_ADDRESS_END => {
-                todo!("UART word writes are not implemented")
-            }
-            PRIMITIVE_AUDIO_ADDRESS => {
-                todo!("Audio word writes are not implemented")
-            }
-            _ => Err(Trap {
-                tcause: crate::traps::TrapType::StoreAccessFault,
-                tval: address,
-            }),
-        }
+        self.bus.write_word(address, word)
     }
     pub fn write_halfword(&mut self, address: u32, halfword: u16) -> Result<(), Trap> {
-        match address {
-            RAM_ADDRESS..=RAM_ADDRESS_END => {
-                let mem_adr = (address - RAM_ADDRESS) as usize;
-                let bytes = self.memory.get_mut(mem_adr..mem_adr + 2).ok_or(Trap {
-                    tcause: crate::traps::TrapType::StoreAccessFault,
-                    tval: address,
-                })?;
-                bytes.copy_from_slice(&halfword.to_le_bytes());
-                Ok(())
-            }
-            UART_ADDRESS..=UART_ADDRESS_END => {
-                todo!("UART halfword writes are not implemented")
-            }
-            PRIMITIVE_AUDIO_ADDRESS => Ok(self.audio.write(halfword as i16)),
-            _ => Err(Trap {
-                tcause: crate::traps::TrapType::StoreAccessFault,
-                tval: address,
-            }),
-        }
+        self.bus.write_halfword(address, halfword)
     }
     pub fn write_byte(&mut self, address: u32, byte: u8) -> Result<(), Trap> {
-        match address {
-            RAM_ADDRESS..=RAM_ADDRESS_END => {
-                self.memory[(address - RAM_ADDRESS) as usize] = byte;
-                Ok(())
-            }
-            UART_ADDRESS => {
-                //println!("Writing 0x{:02x} to UART", byte);
-                self.uart.emu_push(byte);
-                Ok(())
-            }
-            UART_ADDRESS..=UART_ADDRESS_END => {
-                todo!("UART writes to registers above the transmit register are not implemented")
-            }
-            PRIMITIVE_AUDIO_ADDRESS => {
-                todo!("Audio byte writes are not implemented")
-            }
-            _ => Err(Trap {
-                tcause: crate::traps::TrapType::StoreAccessFault,
-                tval: address,
-            }),
-        }
-    }
-    pub fn write_raw_to_ram(&mut self, address: u32, byte: u8) -> bool {
-        match address {
-            RAM_ADDRESS..=RAM_ADDRESS_END => {
-                self.memory[(address - RAM_ADDRESS) as usize] = byte;
-                true
-            }
-            _ => false,
-        }
-    }
-    pub fn read_raw_from_ram(&self, address: u32) -> Option<u8> {
-        match address {
-            RAM_ADDRESS..=RAM_ADDRESS_END => Some(self.memory[(address - RAM_ADDRESS) as usize]),
-            _ => None,
-        }
+        self.bus.write_byte(address, byte)
     }
 }

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::mmu::MMU;
+use crate::bus::MemoryBus;
 
 /// ELF header
 pub struct Header {
@@ -731,7 +731,7 @@ impl ElfAnalyzer {
     }
 }
 
-pub fn elf_setup_mmu(elf: Vec<u8>, mmu: &mut MMU) -> u32 {
+pub fn elf_setup_bus(elf: Vec<u8>, bus: &mut MemoryBus) -> u32 {
     let analyzer = ElfAnalyzer::new(elf);
     let mut symbol_map: HashMap<String, u64> = HashMap::new();
     if !analyzer.validate() {
@@ -770,7 +770,6 @@ pub fn elf_setup_mmu(elf: Vec<u8>, mmu: &mut MMU) -> u32 {
 
     // Detected whether the elf file is riscv-tests.
     // Setting up CPU and Memory depending on it.
-    //let mut mmu = MMU::default();
     for i in 0..program_data_section_headers.len() {
         let sh_addr = program_data_section_headers[i].sh_addr;
         let sh_offset = program_data_section_headers[i].sh_offset as usize;
@@ -778,7 +777,7 @@ pub fn elf_setup_mmu(elf: Vec<u8>, mmu: &mut MMU) -> u32 {
         //println!("{:x}", program_data_section_headers[i].sh_addr);
         if sh_addr >= 0x80000000 && sh_size > 0 {
             for j in 0..sh_size {
-                assert!(mmu.write_raw_to_ram(
+                assert!(bus.write_raw_to_ram(
                     (sh_addr + j as u64) as u32,
                     analyzer.read_byte(sh_offset + j)
                 ),);
