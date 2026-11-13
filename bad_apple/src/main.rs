@@ -35,17 +35,13 @@ const TARGET_FPS: u32 = 10;
 #[riscv_rt::entry]
 fn main() -> ! {
     // Depends on implemented csrrci to disable interrupts for critical section. Can be hacked upon, but this will be wrong.
-    // {
-    //     let heap_bottom = riscv_rt::heap_start() as usize;
-    //     unsafe { 
-    //         let heap_size = &_heap_size as *const u8 as usize;
-    //         HEAP.init(heap_bottom, heap_size) 
-    //     }
-    // }
-    // let mut v = Vec::new();
-    // for i in 0..10 {
-    //     v.push(i);
-    // }
+    {
+        let heap_bottom = riscv_rt::heap_start() as usize;
+        unsafe { 
+            let heap_size = &_heap_size as *const u8 as usize;
+            HEAP.init(heap_bottom, heap_size) 
+        }
+    }
 
     let mut uart = UART::new();
     let audio = Audio::new();

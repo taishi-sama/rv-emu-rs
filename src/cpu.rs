@@ -967,11 +967,38 @@ impl CPU {
         Ok(())
     }
     fn csrrsi(state: &mut CPUState, mmu: &mut MMU, instr: u32) -> Result<(), Trap> {
-        todo!("CSRRSI is not implemented")
+        let csr = get_csr_num(instr);
+        let zimm = get_rs1(instr) as u32;
+        let rd = get_rd(instr);
+        if zimm != 0 {
+            let val = Self::get_csr(state, mmu, csr)?;
+            let set_bits = val | zimm;
+            if !Self::set_csr(state, csr, set_bits)? {
+                todo!("Handle read in write-only registers")
+            }
+            state.set_x(rd, val)
+        } else {
+            let val = Self::get_csr(state, mmu, csr)?;
+            state.set_x(rd, val)
+        }
+        Ok(())
     }
     fn csrrci(state: &mut CPUState, mmu: &mut MMU, instr: u32) -> Result<(), Trap> {
-        todo!("CSRRCI is not implemented")
-        // Ok(())
+        let csr = get_csr_num(instr);
+        let zimm = get_rs1(instr) as u32;
+        let rd = get_rd(instr);
+        if zimm != 0 {
+            let val = Self::get_csr(state, mmu, csr)?;
+            let clear_bits = val & !zimm;
+            if !Self::set_csr(state, csr, clear_bits)? {
+                todo!("Handle read in write-only registers")
+            }
+            state.set_x(rd, val)
+        } else {
+            let val = Self::get_csr(state, mmu, csr)?;
+            state.set_x(rd, val)
+        }
+        Ok(())
     }
     fn mul(state: &mut CPUState, instr: u32) -> Result<(), Trap> {
         let rs1 = get_rs1(instr);

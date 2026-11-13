@@ -57,39 +57,89 @@ __start:
     csrr t2, mscratch
     TEST_CASE 16, t2, 3
 
+    li t0, 0x0f0f0f0f
+    csrw mscratch, t0
+    csrrsi t2, mscratch, 0x1f
+    TEST_CASE 17, t2, 0x0f0f0f0f
+    csrr t2, mscratch
+    TEST_CASE 18, t2, 0x0f0f0f1f
+
+    csrrci t2, mscratch, 0x0f
+    TEST_CASE 19, t2, 0x0f0f0f1f
+    csrr t2, mscratch
+    TEST_CASE 20, t2, 0x0f0f0f10
+
+    csrrsi t2, mscratch, 0
+    TEST_CASE 21, t2, 0x0f0f0f10
+
+    csrrci t2, mscratch, 0
+    TEST_CASE 22, t2, 0x0f0f0f10
+
+    li t0, 0xfffffffe
+    csrw mscratch, t0
+    csrrsi x0, mscratch, 0x1
+    csrr t2, mscratch
+    TEST_CASE 23, t2, 0xffffffff
+
+    csrrci x0, mscratch, 0x10
+    csrr t2, mscratch
+    TEST_CASE 24, t2, 0xffffffef
+
     la s2, __start
     csrw mepc, s2
     csrr t2, mepc
     sub t0, t2, s2
-    TEST_CASE 17, t0, 0
+    TEST_CASE 25, t0, 0
 
     li t0, 0x0000000b
     csrw mcause, t0
     csrr t2, mcause
-    TEST_CASE 18, t2, 0x0000000b
+    TEST_CASE 26, t2, 0x0000000b
 
     la s2, __start
     csrw mtval, s2
     csrr t2, mtval
     sub t0, t2, s2
-    TEST_CASE 19, t0, 0
+    TEST_CASE 27, t0, 0
 
     li t0, 0x00001888
     csrw mstatus, t0
     csrr t2, mstatus
-    TEST_CASE 20, t2, 0x00001888
+    TEST_CASE 28, t2, 0x00001888
 
-    csrr t2, misa
+    csrrsi t2, misa, 0
     srli t2, t2, 30
-    TEST_CASE 21, t2, 1
+    TEST_CASE 29, t2, 1
 
     csrr t2, time
     csrr t3, time
     bgeu t3, t2, 1f
-    fail 22
+    fail 30
     j 2f
-1:  pass 22
+1:  pass 30
 2:
+    li t0, 0x0f0f0f0f
+    csrw mscratch, t0
+    csrrci t2, mscratch, 0x1f
+    TEST_CASE 31, t2, 0x0f0f0f0f
+    csrr t2, mscratch
+    TEST_CASE 32, t2, 0x0f0f0f00
+
+    li t0, 0x00001888
+    csrw mstatus, t0
+    csrrci t2, mstatus, 0x8
+    TEST_CASE 33, t2, 0x00001888
+    csrr t2, mstatus
+    TEST_CASE 34, t2, 0x00001880
+    csrrsi t2, mstatus, 0x8
+    TEST_CASE 35, t2, 0x00001880
+    csrr t2, mstatus
+    TEST_CASE 36, t2, 0x00001888
+
+    csrrci t2, misa, 0
+    srli t2, t2, 30
+    TEST_CASE 37, t2, 1
+
     csrr t2, cycleh
     csrr t2, cycle
 
