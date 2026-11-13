@@ -63,6 +63,10 @@ impl MemoryBus {
             audio_prod,
         )
     }
+    //TODO: implement PLIC and query it  
+    pub fn external_interrupt_pending(&self) -> bool {
+        false
+    }
     // Need to implement only fetch 16 bits of instructions, CPU will fetch upper 16 bits for normal instructions after it decodes length.
     pub fn fetch_halfword(&mut self, address: u32) -> Result<u16, Trap> {
         let result = match address {

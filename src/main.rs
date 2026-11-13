@@ -106,13 +106,13 @@ fn main() {
                 emu.cpu.mmu.bus.uart.host_push(byte);
             }
         }
-        if let Err(err) = emu.cpu.handle_clint() {
+        if let Err(err) = emu.cpu.handle_interrupt() {
             println!("Encountered error! {err:?}");
             break;
         }
         let mut failed = false;
         for _ in 0..step_batch {
-            //WFI means the hart retires nothing; go back to handle_clint immediately instead of
+            //WFI means the hart retires nothing; go back to handle_interrupt immediately instead of
             //burning the rest of the batch on no-op steps.
 
             if emu.cpu.state.wfi {
@@ -243,7 +243,7 @@ mod test {
         let mut emu = emulator::Emulator::from_elf(elf_contents, MMU::new(bus));
         let mut steps = 0;
         while steps < MAX_STEPS {
-            if emu.cpu.handle_clint().is_err() {
+            if emu.cpu.handle_interrupt().is_err() {
                 break;
             }
             if emu.cpu.step().is_err() {

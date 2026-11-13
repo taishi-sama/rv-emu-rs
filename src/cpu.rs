@@ -31,7 +31,18 @@ pub enum PrivilegeMode {
 const MSTATUS_MIE: u32 = 1 << 3;
 const MSTATUS_MPIE: u32 = 1 << 7;
 const MSTATUS_MPP_SHIFT: u32 = 11;
-const MIE_MTIE: u32 = 1 << 7;
+
+//Machine interrupt bits, shared by mie and mip. Priority is platform-defined; like most
+//implementations this takes external before software before timer.
+const INTERRUPT_MSI: u32 = 1 << 3;
+const INTERRUPT_MTI: u32 = 1 << 7;
+const INTERRUPT_MEI: u32 = 1 << 11;
+const MACHINE_INTERRUPT_MASK: u32 = INTERRUPT_MSI | INTERRUPT_MTI | INTERRUPT_MEI;
+const MACHINE_INTERRUPTS: [(u32, TrapType); 3] = [
+    (INTERRUPT_MEI, TrapType::MachineExternalInterrupt),
+    (INTERRUPT_MSI, TrapType::MachineSoftwareInterrupt),
+    (INTERRUPT_MTI, TrapType::MachineTimerInterrupt),
+];
 
 // RV32IMAC
 // Everything that is not memory-related
@@ -89,9 +100,9 @@ impl CPU {
         Ok(instr)
     }
     pub fn step(&mut self) -> Result<u32, EmulatorError> {
-        //Waking from WFI and taking the boundary-polled interrupt happen in handle_clint; step
-        //also re-checks the latch after each instruction so an interrupt enabled mid-batch is
-        //taken immediately. A halted hart simply retires nothing.
+        //Waking from WFI and taking the boundary-polled interrupt happen in handle_interrupt;
+        //step re-checks the latch after each instruction so an interrupt seen by the last poll
+        //is taken as soon as mstatus.MIE becomes set. A halted hart simply retires nothing.
         if self.state.wfi {
             return Ok(0);
         }
@@ -101,7 +112,7 @@ impl CPU {
                 //A pending interrupt must be taken as soon as MIE becomes set, not only at the
                 //next host poll; the guest can enable and disable MIE inside one batch.
                 if self.state.interrupt_pending && self.state.mstatus as u32 & MSTATUS_MIE != 0 {
-                    self.handle_clint()?;
+                    self.handle_interrupt()?;
                 }
                 return Ok(v);
             }
@@ -111,20 +122,27 @@ impl CPU {
             }
         }
     }
-    //Wake the hart from WFI and deliver a pending machine timer interrupt.
-    pub fn handle_clint(&mut self) -> Result<(), EmulatorError> {
+    //Sample the machine interrupt sources, wake WFI, and take the highest-priority enabled
+    //interrupt. External-controller interrupts plug in through MMU::meip; S-mode delegation
+    //will extend the delivery target here.
+    pub fn handle_interrupt(&mut self) -> Result<(), EmulatorError> {
         let pending = Self::pending_mip(&self.state, &mut self.mmu);
-        self.state.interrupt_pending = self.state.mie & pending & MIE_MTIE != 0;
+        let deliverable = self.state.mie & pending & MACHINE_INTERRUPT_MASK;
+        self.state.interrupt_pending = deliverable != 0;
         //WFI wakes on any locally enabled interrupt, even when mstatus.MIE is clear.
         if self.state.wfi && self.state.mie & pending != 0 {
             self.state.wfi = false;
         }
-        if self.state.mie & pending & MIE_MTIE != 0 && self.state.mstatus as u32 & MSTATUS_MIE != 0
-        {
-            self.state.process_trap(Trap {
-                tcause: TrapType::MachineTimerInterrupt,
-                tval: 0,
-            })?;
+        if deliverable == 0 || self.state.mstatus as u32 & MSTATUS_MIE == 0 {
+            return Ok(());
+        }
+        for (bit, cause) in MACHINE_INTERRUPTS {
+            if deliverable & bit != 0 {
+                return self.state.process_trap(Trap {
+                    tcause: cause,
+                    tval: 0,
+                });
+            }
         }
         Ok(())
     }
@@ -815,14 +833,18 @@ impl CPU {
         });
     }
 
-    //Machine interrupt pending bits, with MSIP and MTIP driven by the CLINT.
+    //Machine interrupt pending bits, also used as the mip CSR read value. MSIP and MTIP come
+    //from the CLINT; MEIP is the external controller line, hooked up through MMU::meip.
     fn pending_mip(state: &CPUState, mmu: &mut MMU) -> u32 {
-        let mut mip = state.mip & !0b1000_1000;
+        let mut mip = state.mip & !MACHINE_INTERRUPT_MASK;
         if mmu.msip() {
-            mip |= 1 << 3;
+            mip |= INTERRUPT_MSI;
         }
         if mmu.mtip() {
-            mip |= 1 << 7;
+            mip |= INTERRUPT_MTI;
+        }
+        if mmu.meip() {
+            mip |= INTERRUPT_MEI;
         }
         mip
     }
@@ -863,14 +885,16 @@ impl CPU {
         match csr {
             0x340 => state.mscratch = new_val,
             0x305 => state.mtvec = new_val & !0b11, //Only direct mode is implemented
-            0x304 => state.mie = new_val,
+            //Only the implemented machine interrupt bits exist; S-mode bits arrive with S-mode.
+            0x304 => state.mie = new_val & MACHINE_INTERRUPT_MASK,
             0xC00 => {
                 return Ok(false);
             } //cyclel
             0xC80 => {
                 return Ok(false);
             } //cycleh
-            0x344 => state.mip = new_val & !0b1000_1000, //MSIP and MTIP are CLINT-driven
+            //MSIP, MTIP and MEIP are device-driven and read-only from the CSR side.
+            0x344 => state.mip = new_val & !MACHINE_INTERRUPT_MASK,
             0x341 => state.mepc = new_val,
             0x3a0..=0x3a3 => state.pmpcfg[(csr - 0x3a0) as usize] = new_val,
             0x3b0..=0x3bf => state.pmpaddr[(csr - 0x3b0) as usize] = new_val,

@@ -22,6 +22,10 @@ impl MMU {
     pub fn mtip(&mut self) -> bool {
         self.bus.clint.mtip()
     }
+    //Machine external interrupt line
+    pub fn meip(&mut self) -> bool {
+        self.bus.external_interrupt_pending()
+    }
     pub fn fetch_halfword(&mut self, address: u32) -> Result<u16, Trap> {
         self.bus.fetch_halfword(address)
     }
