@@ -91,6 +91,9 @@ fn main() {
         Some(rx)
     };
     let mut counter: u128 = 1;
+    //Execute batch of instructions 
+    const DEVICE_UPDATE_INTERVAL: usize = 16;
+    let step_batch = if display { 1 } else { DEVICE_UPDATE_INTERVAL };
     loop {
         //let display = true;
         let pc = emu.cpu.state.pc;
@@ -107,7 +110,20 @@ fn main() {
             println!("Encountered error! {err:?}");
             break;
         }
-        let res = emu.cpu.step();
+        let mut failed = false;
+        for _ in 0..step_batch {
+            //WFI means the hart retires nothing; go back to handle_clint immediately instead of
+            //burning the rest of the batch on no-op steps.
+            
+            if emu.cpu.state.wfi {
+                break;
+            }
+            if let Err(err) = emu.cpu.step() {
+                println!("Encountered error! {err:?}");
+                failed = true;
+                break;
+            }
+        }
         let mut wrote = false;
         while let Some(x) = emu.cpu.mmu.bus.uart.try_get_byte() {
             print!("{}", x as char);
@@ -116,29 +132,33 @@ fn main() {
         if wrote {
             let _ = io::stdout().flush();
         }
-        match res {
-            Ok(instr) => {
-                if display {
-                    println!(
-                        "Executed instruction 0x{:0>8x} on address {:x}; instruction no {}",
-                        instr, pc, counter
-                    );
-                    for (ind, x) in emu.cpu.state.get_registers().into_iter().enumerate() {
-                        let reg_name = reg_names[ind];
-                        print!("{reg_name:<3}: {:^10x}; ", x);
-                        if ind % 8 == 7 && ind != 0 {
-                            println!()
-                        }
-                    }
-                    println!()
-                }
-            }
-            Err(trap) => {
-                //println!("Achieved trap: {} on address {:x}", trap, emu.cpu.pc);
-                println!("Encountered error! {trap:?}");
-                break;
-            }
+        //Drain before acting on a fatal error or syscon request so the last output is not lost.
+        if failed {
+            break;
         }
+        // match res {
+        //     Ok(instr) => {
+        //         if display {
+        //             println!(
+        //                 "Executed instruction 0x{:0>8x} on address {:x}; instruction no {}",
+        //                 instr, pc, counter
+        //             );
+        //             for (ind, x) in emu.cpu.state.get_registers().into_iter().enumerate() {
+        //                 let reg_name = reg_names[ind];
+        //                 print!("{reg_name:<3}: {:^10x}; ", x);
+        //                 if ind % 8 == 7 && ind != 0 {
+        //                     println!()
+        //                 }
+        //             }
+        //             println!()
+        //         }
+        //     }
+        //     Err(trap) => {
+        //         //println!("Achieved trap: {} on address {:x}", trap, emu.cpu.pc);
+        //         println!("Encountered error! {trap:?}");
+        //         break;
+        //     }
+        // }
 
         if let Some(event) = emu.take_syscon_event() {
             match event {
