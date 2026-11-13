@@ -5,13 +5,17 @@ use std::{
 
 use crate::{
     errors::EmulatorError,
-    mmu::{MMU, RAM_ADDRESS, RAM_SIZE},
+    mmu::{AtomicAccess, MMU, RAM_ADDRESS, RAM_SIZE},
     ops_decode::{
-        get_compressed_ci_addi16sp_imm, get_compressed_ci_lui_imm, get_compressed_ciw_addi4spn_imm,
+        get_compressed_cb_and_imm, get_compressed_cb_branch_imm, get_compressed_cb_shift_imm,
+        get_compressed_ci_addi16sp_imm, get_compressed_ci_li_addi_imm, get_compressed_ci_lui_imm,
+        get_compressed_ci_stack_load_32_imm, get_compressed_ciw_addi4spn_imm,
+        get_compressed_cj_jump_imm, get_compressed_cl_mem_load_32_imm,
+        get_compressed_cs_mem_store_32_imm, get_compressed_css_stack_write_32_imm,
         get_compressed_func, get_compressed_func3, get_compressed_func6, get_compressed_rd,
-        get_compressed_rs2, get_csr_num, get_funct3, get_funct7, get_imm_b_type, get_imm_i_type,
-        get_imm_j_type, get_imm_s_type, get_imm_u_type, get_opcode, get_rd, get_rs1, get_rs2,
-        get_rs3,
+        get_compressed_rdc, get_compressed_rs1c, get_compressed_rs2, get_csr_num, get_funct3,
+        get_funct7, get_imm_b_type, get_imm_i_type, get_imm_j_type, get_imm_s_type, get_imm_u_type,
+        get_opcode, get_rd, get_rs1, get_rs2, get_rs3,
     },
     traps::{Trap, TrapType},
 };
@@ -49,6 +53,7 @@ pub struct CPU {
     pub mcause: u32,
     pub privilege: PrivilegeMode,
     pub wfi: bool,
+    //Address of the word reserved by LR.W, accepted by SC.W afterwards.
     pub reservation_slot: Option<u32>,
     pub stopflag: Option<Arc<AtomicBool>>,
 }
@@ -540,7 +545,7 @@ impl CPU {
         let imm = get_imm_i_type(instr);
         let t = (self.get_x(rs1).wrapping_add(imm)) & !1;
         //if t & 0b11 == 0 {
-        self.set_x(rd, self.pc + 4);
+        self.set_x(rd, self.pc.wrapping_add(4));
         self.pc = t.wrapping_sub(4);
         Ok(())
         //} else {
@@ -886,7 +891,7 @@ impl CPU {
         //TODO: privileges check
         match csr {
             0x340 => self.mscratch = new_val,
-            0x305 => self.mtvec = new_val,
+            0x305 => self.mtvec = new_val & !0b11, //Only direct mode is implemented
             0x304 => self.mie = new_val,
             0xC00 => {
                 return Ok(false);
@@ -993,7 +998,7 @@ impl CPU {
                 todo!("Handle write in read-only registers")
             }
         }
-        Ok(())  
+        Ok(())
     }
     fn csrrsi(&mut self, instr: u32) -> Result<(), Trap> {
         todo!("CSRRSI is not implemented")
@@ -1089,128 +1094,337 @@ impl CPU {
         let rs1 = self.get_x(rs1);
         let rs2 = self.get_x(rs2);
 
-        let m = if rs2 != 0 {
-            rs1.wrapping_rem(rs2)
-        } else {
-            rs1
-        };
+        let m = if rs2 != 0 { rs1.wrapping_rem(rs2) } else { rs1 };
         self.set_x(rd, m);
         Ok(())
     }
     fn lr_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!("LR.W is not implemented")
+        let rs1 = get_rs1(instr);
+        let rd = get_rd(instr);
+        if get_rs2(instr) != 0 {
+            //rs2 is reserved for LR.W
+            return Err(illegal_instruction(instr));
+        }
+        let address = self.get_x(rs1);
+        let value = self.mmu.read_word_atomically(address, AtomicAccess::Load)?;
+        self.reservation_slot = Some(address);
+        self.set_x(rd, value);
+        Ok(())
     }
     fn sc_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!("SC.W is not implemented")
+        let rs1 = get_rs1(instr);
+        let rs2 = get_rs2(instr);
+        let rd = get_rd(instr);
+        let address = self.get_x(rs1);
+        let reserved = self.reservation_slot == Some(address);
+        self.reservation_slot = None;
+        if reserved {
+            self.mmu.write_word_atomically(address, self.get_x(rs2))?;
+            self.set_x(rd, 0);
+        } else {
+            //A failed SC.W still accesses its address, so the address check must still happen
+            self.mmu
+                .read_word_atomically(address, AtomicAccess::Store)?;
+            self.set_x(rd, 1);
+        }
+        Ok(())
     }
     fn amoswap_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!("AMOSWAP.W is not implemented")
+        let rs1 = get_rs1(instr);
+        let rs2 = get_rs2(instr);
+        let rd = get_rd(instr);
+        let address = self.get_x(rs1);
+        let old = self
+            .mmu
+            .read_word_atomically(address, AtomicAccess::Store)?;
+        self.mmu.write_word_atomically(address, self.get_x(rs2))?;
+        self.set_x(rd, old);
+        Ok(())
     }
     fn amoadd_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!("AMOADD.W is not implemented")
+        let rs1 = get_rs1(instr);
+        let rs2 = get_rs2(instr);
+        let rd = get_rd(instr);
+        let address = self.get_x(rs1);
+        let old = self
+            .mmu
+            .read_word_atomically(address, AtomicAccess::Store)?;
+        let new = old.wrapping_add(self.get_x(rs2));
+        self.mmu.write_word_atomically(address, new)?;
+        self.set_x(rd, old);
+        Ok(())
     }
     fn amoxor_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!("AMOXOR.W is not implemented")
+        let rs1 = get_rs1(instr);
+        let rs2 = get_rs2(instr);
+        let rd = get_rd(instr);
+        let address = self.get_x(rs1);
+        let old = self
+            .mmu
+            .read_word_atomically(address, AtomicAccess::Store)?;
+        let new = old ^ self.get_x(rs2);
+        self.mmu.write_word_atomically(address, new)?;
+        self.set_x(rd, old);
+        Ok(())
     }
     fn amoand_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!("AMOAND.W is not implemented")
+        let rs1 = get_rs1(instr);
+        let rs2 = get_rs2(instr);
+        let rd = get_rd(instr);
+        let address = self.get_x(rs1);
+        let old = self
+            .mmu
+            .read_word_atomically(address, AtomicAccess::Store)?;
+        let new = old & self.get_x(rs2);
+        self.mmu.write_word_atomically(address, new)?;
+        self.set_x(rd, old);
+        Ok(())
     }
     fn amoor_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!("AMOOR.W is not implemented")
+        let rs1 = get_rs1(instr);
+        let rs2 = get_rs2(instr);
+        let rd = get_rd(instr);
+        let address = self.get_x(rs1);
+        let old = self
+            .mmu
+            .read_word_atomically(address, AtomicAccess::Store)?;
+        let new = old | self.get_x(rs2);
+        self.mmu.write_word_atomically(address, new)?;
+        self.set_x(rd, old);
+        Ok(())
     }
     fn amomin_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!("AMOMIN.W is not implemented")
+        let rs1 = get_rs1(instr);
+        let rs2 = get_rs2(instr);
+        let rd = get_rd(instr);
+        let address = self.get_x(rs1);
+        let old = self
+            .mmu
+            .read_word_atomically(address, AtomicAccess::Store)?;
+        let value = self.get_x(rs2);
+        let new = if (old as i32) < (value as i32) {
+            old
+        } else {
+            value
+        };
+        self.mmu.write_word_atomically(address, new)?;
+        self.set_x(rd, old);
+        Ok(())
     }
     fn amomax_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!("AMOMAX.W is not implemented")
+        let rs1 = get_rs1(instr);
+        let rs2 = get_rs2(instr);
+        let rd = get_rd(instr);
+        let address = self.get_x(rs1);
+        let old = self
+            .mmu
+            .read_word_atomically(address, AtomicAccess::Store)?;
+        let value = self.get_x(rs2);
+        let new = if (old as i32) > (value as i32) {
+            old
+        } else {
+            value
+        };
+        self.mmu.write_word_atomically(address, new)?;
+        self.set_x(rd, old);
+        Ok(())
     }
     fn amominu_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!("AMOMINU.W is not implemented")
+        let rs1 = get_rs1(instr);
+        let rs2 = get_rs2(instr);
+        let rd = get_rd(instr);
+        let address = self.get_x(rs1);
+        let old = self
+            .mmu
+            .read_word_atomically(address, AtomicAccess::Store)?;
+        let value = self.get_x(rs2);
+        let new = if old < value { old } else { value };
+        self.mmu.write_word_atomically(address, new)?;
+        self.set_x(rd, old);
+        Ok(())
     }
     fn amomaxu_w(&mut self, instr: u32) -> Result<(), Trap> {
-        todo!("AMOMAXU.W is not implemented")
+        let rs1 = get_rs1(instr);
+        let rs2 = get_rs2(instr);
+        let rd = get_rd(instr);
+        let address = self.get_x(rs1);
+        let old = self
+            .mmu
+            .read_word_atomically(address, AtomicAccess::Store)?;
+        let value = self.get_x(rs2);
+        let new = if old > value { old } else { value };
+        self.mmu.write_word_atomically(address, new)?;
+        self.set_x(rd, old);
+        Ok(())
     }
 
     fn c_addi4spn(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.ADDI4SPN is not implemented")
+        let rd = get_compressed_rdc(instr) + 8;
+        let nzuimm = get_compressed_ciw_addi4spn_imm(instr);
+        self.set_x(rd, self.get_x(2).wrapping_add(nzuimm));
+        Ok(())
     }
     fn c_lw(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.LW is not implemented")
+        let rd = get_compressed_rdc(instr) + 8;
+        let rs1 = get_compressed_rs1c(instr) + 8;
+        let uimm = get_compressed_cl_mem_load_32_imm(instr);
+        let address = self.get_x(rs1).wrapping_add(uimm);
+        let value = self.mmu.read_word(address)?;
+        self.set_x(rd, value);
+        Ok(())
     }
     fn c_sw(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.SW is not implemented")
+        let rs2 = get_compressed_rdc(instr) + 8;
+        let rs1 = get_compressed_rs1c(instr) + 8;
+        let uimm = get_compressed_cs_mem_store_32_imm(instr);
+        let address = self.get_x(rs1).wrapping_add(uimm);
+        self.mmu.write_word(address, self.get_x(rs2))
     }
     fn c_nop(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.NOP is not implemented")
+        Ok(())
     }
     fn c_addi(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.ADDI is not implemented")
+        let rd = get_compressed_rd(instr);
+        let imm = get_compressed_ci_li_addi_imm(instr);
+        self.set_x(rd, self.get_x(rd).wrapping_add(imm));
+        Ok(())
     }
     fn c_jal(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.JAL is not implemented")
+        let offset = get_compressed_cj_jump_imm(instr);
+        self.set_x(1, self.pc.wrapping_add(2));
+        self.pc = self.pc.wrapping_add(offset).wrapping_sub(2);
+        Ok(())
     }
     fn c_li(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.LI is not implemented")
+        let rd = get_compressed_rd(instr);
+        let imm = get_compressed_ci_li_addi_imm(instr);
+        self.set_x(rd, imm);
+        Ok(())
     }
     fn c_addi16sp(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.ADDI16SP is not implemented")
+        let imm = get_compressed_ci_addi16sp_imm(instr);
+        self.set_x(2, self.get_x(2).wrapping_add(imm));
+        Ok(())
     }
     fn c_lui(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.LUI is not implemented")
+        let rd = get_compressed_rd(instr);
+        let imm = get_compressed_ci_lui_imm(instr);
+        self.set_x(rd, imm);
+        Ok(())
     }
     fn c_srli(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.SRLI is not implemented")
+        let rd = get_compressed_rs1c(instr) + 8;
+        let shamt = get_compressed_cb_shift_imm(instr);
+        self.set_x(rd, self.get_x(rd).wrapping_shr(shamt));
+        Ok(())
     }
     fn c_srai(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.SRAI is not implemented")
+        let rd = get_compressed_rs1c(instr) + 8;
+        let shamt = get_compressed_cb_shift_imm(instr);
+        self.set_x(rd, (self.get_x(rd) as i32).wrapping_shr(shamt) as u32);
+        Ok(())
     }
     fn c_andi(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.ANDI is not implemented")
+        let rd = get_compressed_rs1c(instr) + 8;
+        let imm = get_compressed_cb_and_imm(instr);
+        self.set_x(rd, self.get_x(rd) & imm);
+        Ok(())
     }
     fn c_sub(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.SUB is not implemented")
+        let rd = get_compressed_rs1c(instr) + 8;
+        let rs2 = get_compressed_rdc(instr) + 8;
+        self.set_x(rd, self.get_x(rd).wrapping_sub(self.get_x(rs2)));
+        Ok(())
     }
     fn c_xor(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.XOR is not implemented")
+        let rd = get_compressed_rs1c(instr) + 8;
+        let rs2 = get_compressed_rdc(instr) + 8;
+        self.set_x(rd, self.get_x(rd) ^ self.get_x(rs2));
+        Ok(())
     }
     fn c_or(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.OR is not implemented")
+        let rd = get_compressed_rs1c(instr) + 8;
+        let rs2 = get_compressed_rdc(instr) + 8;
+        self.set_x(rd, self.get_x(rd) | self.get_x(rs2));
+        Ok(())
     }
     fn c_and(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.AND is not implemented")
+        let rd = get_compressed_rs1c(instr) + 8;
+        let rs2 = get_compressed_rdc(instr) + 8;
+        self.set_x(rd, self.get_x(rd) & self.get_x(rs2));
+        Ok(())
     }
     fn c_j(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.J is not implemented")
+        let offset = get_compressed_cj_jump_imm(instr);
+        self.pc = self.pc.wrapping_add(offset).wrapping_sub(2);
+        Ok(())
     }
     fn c_beqz(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.BEQZ is not implemented")
+        let rs1 = get_compressed_rs1c(instr) + 8;
+        let offset = get_compressed_cb_branch_imm(instr);
+        if self.get_x(rs1) == 0 {
+            self.pc = self.pc.wrapping_add(offset).wrapping_sub(2);
+        }
+        Ok(())
     }
     fn c_bnez(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.BNEZ is not implemented")
+        let rs1 = get_compressed_rs1c(instr) + 8;
+        let offset = get_compressed_cb_branch_imm(instr);
+        if self.get_x(rs1) != 0 {
+            self.pc = self.pc.wrapping_add(offset).wrapping_sub(2);
+        }
+        Ok(())
     }
     fn c_slli(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.SLLI is not implemented")
+        let rd = get_compressed_rd(instr);
+        let shamt = get_compressed_cb_shift_imm(instr);
+        self.set_x(rd, self.get_x(rd).wrapping_shl(shamt));
+        Ok(())
     }
     fn c_lwsp(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.LWSP is not implemented")
+        let rd = get_compressed_rd(instr);
+        let uimm = get_compressed_ci_stack_load_32_imm(instr);
+        let address = self.get_x(2).wrapping_add(uimm);
+        let value = self.mmu.read_word(address)?;
+        self.set_x(rd, value);
+        Ok(())
     }
     fn c_jr(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.JR is not implemented")
+        let rs1 = get_compressed_rd(instr);
+        let target = self.get_x(rs1) & !1;
+        self.pc = target.wrapping_sub(2);
+        Ok(())
     }
     fn c_mv(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.MV is not implemented")
+        let rd = get_compressed_rd(instr);
+        let rs2 = get_compressed_rs2(instr);
+        self.set_x(rd, self.get_x(rs2));
+        Ok(())
     }
     fn c_ebreak(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.EBREAK is not implemented")
+        Err(Trap {
+            tcause: TrapType::Breakpoint,
+            tval: self.pc,
+        })
     }
     fn c_jalr(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.JALR is not implemented")
+        let rs1 = get_compressed_rd(instr);
+        let target = self.get_x(rs1) & !1;
+        self.set_x(1, self.pc.wrapping_add(2));
+        self.pc = target.wrapping_sub(2);
+        Ok(())
     }
     fn c_add(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.ADD is not implemented")
+        let rd = get_compressed_rd(instr);
+        let rs2 = get_compressed_rs2(instr);
+        self.set_x(rd, self.get_x(rd).wrapping_add(self.get_x(rs2)));
+        Ok(())
     }
     fn c_swsp(&mut self, instr: u16) -> Result<(), Trap> {
-        todo!("C.SWSP is not implemented")
+        let rs2 = get_compressed_rs2(instr);
+        let uimm = get_compressed_css_stack_write_32_imm(instr);
+        let address = self.get_x(2).wrapping_add(uimm);
+        self.mmu.write_word(address, self.get_x(rs2))
     }
 }
 
@@ -1310,15 +1524,5 @@ mod tests {
             //A trap is raised before the pc is advanced
             assert_eq!(cpu.pc, RAM_ADDRESS);
         }
-    }
-
-    //C.ANDI carries imm[5] in bit 12, so the negative immediates must not be mistaken for
-    //reserved encodings.
-    #[test]
-    #[should_panic(expected = "C.ANDI is not implemented")]
-    fn c_andi_accepts_negative_immediates() {
-        //c.andi a0,-1
-        let mut cpu = cpu_with_instruction(&0x997du16.to_le_bytes());
-        let _ = cpu.execute_instruction();
     }
 }

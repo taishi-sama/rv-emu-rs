@@ -167,20 +167,20 @@ pub fn get_compressed_ci_stack_load_32_imm(instruction: u16) -> u32 {
 }
 //Don't appliable for C.LDSP, C.LQSP, C.FLDSP, C.SDSP, C.SQSP, C.FSDSP
 pub fn get_compressed_css_stack_write_32_imm(instruction: u16) -> u32 {
-    let off7_6: u32 = shift_and_trim16!(instruction, 6, 2);
-    let off5_2: u32 = shift_and_trim16!(instruction, 8, 4);
+    let off5_2: u32 = shift_and_trim16!(instruction, 9, 4);
+    let off7_6: u32 = shift_and_trim16!(instruction, 7, 2);
     off5_2 << 2 | off7_6 << 6
 }
 pub fn get_compressed_cl_mem_load_32_imm(instruction: u16) -> u32 {
     let off5_3: u32 = shift_and_trim16!(instruction, 10, 3);
-    let off6: u32 = shift_and_trim16!(instruction, 2, 2);
-    let off2: u32 = shift_and_trim16!(instruction, 4, 3);
+    let off6: u32 = shift_and_trim16!(instruction, 5, 1);
+    let off2: u32 = shift_and_trim16!(instruction, 6, 1);
     off6 << 6 | off5_3 << 3 | off2 << 2
 }
 pub fn get_compressed_cs_mem_store_32_imm(instruction: u16) -> u32 {
     let off5_3: u32 = shift_and_trim16!(instruction, 10, 3);
-    let off6: u32 = shift_and_trim16!(instruction, 2, 2);
-    let off2: u32 = shift_and_trim16!(instruction, 4, 3);
+    let off6: u32 = shift_and_trim16!(instruction, 5, 1);
+    let off2: u32 = shift_and_trim16!(instruction, 6, 1);
     off6 << 6 | off5_3 << 3 | off2 << 2
 }
 pub fn get_compressed_cb_shift_imm(instruction: u16) -> u32 {

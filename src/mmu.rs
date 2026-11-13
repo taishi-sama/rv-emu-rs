@@ -14,6 +14,13 @@ pub const UART_ADDRESS: u32 = 0x10000000;
 pub const UART_ADDRESS_END: u32 = 0x10000000 + UART_REGION_SIZE as u32 - 1;
 pub const PRIMITIVE_AUDIO_ADDRESS: u32 = 0x10000200;
 
+//Selects the fault type an atomic access reports: LR.W faults as a load, SC.W and AMOs as stores.
+#[derive(Clone, Copy)]
+pub enum AtomicAccess {
+    Load,
+    Store,
+}
+
 pub struct MMU {
     memory: Box<[u8]>,
     pub uart: UART,
@@ -56,13 +63,51 @@ impl MMU {
             }),
         }
     }
+    //Atomic accesses only exist for RAM words: MMIO devices are not atomically addressable.
+    fn atomic_word_offset(address: u32, access: AtomicAccess) -> Result<usize, Trap> {
+        if address & 0b11 != 0 {
+            return Err(Trap {
+                tcause: match access {
+                    AtomicAccess::Load => crate::traps::TrapType::LoadAddressMisaligned,
+                    AtomicAccess::Store => crate::traps::TrapType::StoreAddressMisaligned,
+                },
+                tval: address,
+            });
+        }
+        if matches!(address, UART_ADDRESS..=UART_ADDRESS_END) || address == PRIMITIVE_AUDIO_ADDRESS {
+            todo!("Atomic access to MMIO address 0x{address:x} is not implemented");
+        }
+        if !matches!(address, RAM_ADDRESS..=RAM_ADDRESS_END) {
+            return Err(Trap {
+                tcause: match access {
+                    AtomicAccess::Load => crate::traps::TrapType::LoadAccessFault,
+                    AtomicAccess::Store => crate::traps::TrapType::StoreAccessFault,
+                },
+                tval: address,
+            });
+        }
+        Ok((address - RAM_ADDRESS) as usize)
+    }
+    pub fn read_word_atomically(&self, address: u32, access: AtomicAccess) -> Result<u32, Trap> {
+        let mem_adr = Self::atomic_word_offset(address, access)?;
+        Ok(u32::from_le_bytes(
+            self.memory[mem_adr..mem_adr + 4].try_into().unwrap(),
+        ))
+    }
+    pub fn write_word_atomically(&mut self, address: u32, word: u32) -> Result<(), Trap> {
+        let mem_adr = Self::atomic_word_offset(address, AtomicAccess::Store)?;
+        self.memory[mem_adr..mem_adr + 4].copy_from_slice(&word.to_le_bytes());
+        Ok(())
+    }
     pub fn read_word(&self, address: u32) -> Result<u32, Trap> {
         match address {
             RAM_ADDRESS..=RAM_ADDRESS_END => {
                 let mem_adr = (address - RAM_ADDRESS) as usize;
-                Ok(u32::from_le_bytes(
-                    self.memory[mem_adr..mem_adr + 4].try_into().unwrap(),
-                ))
+                let bytes = self.memory.get(mem_adr..mem_adr + 4).ok_or(Trap {
+                    tcause: crate::traps::TrapType::LoadAccessFault,
+                    tval: address,
+                })?;
+                Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
             }
             UART_ADDRESS..=UART_ADDRESS_END => {
                 todo!("UART word reads are not implemented")
@@ -78,9 +123,11 @@ impl MMU {
         match address {
             RAM_ADDRESS..=RAM_ADDRESS_END => {
                 let mem_adr = (address - RAM_ADDRESS) as usize;
-                Ok(u16::from_le_bytes(
-                    self.memory[mem_adr..mem_adr + 2].try_into().unwrap(),
-                ))
+                let bytes = self.memory.get(mem_adr..mem_adr + 2).ok_or(Trap {
+                    tcause: crate::traps::TrapType::LoadAccessFault,
+                    tval: address,
+                })?;
+                Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
             }
             UART_ADDRESS..=UART_ADDRESS_END => {
                 todo!("UART halfword reads are not implemented")
@@ -112,9 +159,12 @@ impl MMU {
     pub fn write_word(&mut self, address: u32, word: u32) -> Result<(), Trap> {
         match address {
             RAM_ADDRESS..=RAM_ADDRESS_END => {
-                let word = word.to_le_bytes();
                 let mem_adr = (address - RAM_ADDRESS) as usize;
-                self.memory[mem_adr..mem_adr + 4].copy_from_slice(&word);
+                let bytes = self.memory.get_mut(mem_adr..mem_adr + 4).ok_or(Trap {
+                    tcause: crate::traps::TrapType::StoreAccessFault,
+                    tval: address,
+                })?;
+                bytes.copy_from_slice(&word.to_le_bytes());
                 Ok(())
             }
             UART_ADDRESS..=UART_ADDRESS_END => {
@@ -132,9 +182,12 @@ impl MMU {
     pub fn write_halfword(&mut self, address: u32, halfword: u16) -> Result<(), Trap> {
         match address {
             RAM_ADDRESS..=RAM_ADDRESS_END => {
-                let word = halfword.to_le_bytes();
                 let mem_adr = (address - RAM_ADDRESS) as usize;
-                self.memory[mem_adr..mem_adr + 2].copy_from_slice(&word);
+                let bytes = self.memory.get_mut(mem_adr..mem_adr + 2).ok_or(Trap {
+                    tcause: crate::traps::TrapType::StoreAccessFault,
+                    tval: address,
+                })?;
+                bytes.copy_from_slice(&halfword.to_le_bytes());
                 Ok(())
             }
             UART_ADDRESS..=UART_ADDRESS_END => {

@@ -21,7 +21,7 @@ pub mod uart;
 
 fn main() {
     //let mut m = mmu::MMU::default();
-    let mut path = "./bad_apple/target/riscv32i-unknown-none-elf/release/bad_apple".to_string();
+    let mut path = "./bad_apple/target/riscv32imac-unknown-none-elf/release/bad_apple".to_string();
     //let mut path = "./bad_apple/target/riscv32i-unknown-none-elf/debug/bad_apple".to_string();
 
     //let path = "./test_asm/target/testtraps.s.elf";
@@ -218,6 +218,15 @@ mod test {
     arch_tests! {
         test_add: ("testadd.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
         test_addi: ("testaddi.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
+        test_amoadd: ("testamoadd.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+        test_amoand: ("testamoand.s.elf", &[2, 3, 4, 5]),
+        test_amomax: ("testamomax.s.elf", &[2, 3, 4, 5, 6, 7]),
+        test_amomaxu: ("testamomaxu.s.elf", &[2, 3, 4, 5, 6, 7]),
+        test_amomin: ("testamomin.s.elf", &[2, 3, 4, 5, 6, 7]),
+        test_amominu: ("testamominu.s.elf", &[2, 3, 4, 5, 6, 7]),
+        test_amoor: ("testamoor.s.elf", &[2, 3, 4, 5]),
+        test_amoswap: ("testamoswap.s.elf", &[2, 3, 4, 5]),
+        test_amoxor: ("testamoxor.s.elf", &[2, 3, 4, 5]),
         test_and: ("testand.s.elf", &[2, 3, 4, 5, 6, 7, 8]),
         test_andi: ("testandi.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9]),
         test_auipc: ("testauipc.s.elf", &[2, 3, 4, 5, 6]),
@@ -227,9 +236,36 @@ mod test {
         test_blt: ("testblt.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9]),
         test_bltu: ("testbltu.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9]),
         test_bne: ("testbne.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9]),
-        test_csr: (
-            "testcsr.s.elf",
-            &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29],
+        test_cadd: ("testcadd.s.elf", &[2, 3]),
+        test_caddi: ("testcaddi.s.elf", &[2, 3, 4, 5]),
+        test_caddi16sp: ("testcaddi16sp.s.elf", &[2, 3]),
+        test_caddi4spn: ("testcaddi4spn.s.elf", &[2, 3]),
+        test_cand: ("testcand.s.elf", &[2, 3]),
+        test_candi: ("testcandi.s.elf", &[2, 3, 4]),
+        test_cbeqz: ("testcbeqz.s.elf", &[2, 3, 4]),
+        test_cbnez: ("testcbnez.s.elf", &[2, 3, 4]),
+        test_cebreak: ("testcebreak.s.elf", &[2, 3]),
+        test_cj: ("testcj.s.elf", &[2, 3]),
+        test_cjal: ("testcjal.s.elf", &[2]),
+        test_cjalr: ("testcjalr.s.elf", &[2, 3, 4]),
+        test_cjr: ("testcjr.s.elf", &[2, 3]),
+        test_cli: ("testcli.s.elf", &[2, 3, 4]),
+        test_clui: ("testclui.s.elf", &[2, 3, 4]),
+        test_clw: ("testclw.s.elf", &[2, 3, 4]),
+        test_clwsp: ("testclwsp.s.elf", &[2, 3]),
+        test_cmv: ("testcmv.s.elf", &[2, 3]),
+        test_cnop: ("testcnop.s.elf", &[2, 3]),
+        test_cor: ("testcor.s.elf", &[2, 3]),
+        test_cslli: ("testcslli.s.elf", &[2, 3, 4]),
+        test_csrai: ("testcsrai.s.elf", &[2, 3]),
+        test_csrli: ("testcsrli.s.elf", &[2, 3]),
+        test_csub: ("testcsub.s.elf", &[2, 3]),
+        test_csw: ("testcsw.s.elf", &[2, 3, 4]),
+        test_cswsp: ("testcswsp.s.elf", &[2, 3]),
+        test_cxor: ("testcxor.s.elf", &[2, 3]),
+        test_mcsr: (
+            "testmcsr.s.elf",
+            &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22],
         ),
         test_div: ("testdiv.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10]),
         test_divu: ("testdivu.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10]),
@@ -242,6 +278,10 @@ mod test {
         test_lhu: ("testlhu.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
         test_lui: ("testlui.s.elf", &[2, 3, 4, 5, 6, 7]),
         test_lw: ("testlw.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+        test_lrsc: (
+            "testlrsc.s.elf",
+            &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+        ),
         test_mul: ("testmul.s.elf", &[2, 3, 4, 5, 6, 7, 30, 31, 32, 33, 34, 35, 36, 37]),
         test_mulh: ("testmulh.s.elf", &[2, 3, 4, 5, 6, 7, 30, 31, 32, 33, 34, 35]),
         test_mulhsu: ("testmulhsu.s.elf", &[2, 3, 4, 5, 6, 7, 30, 31, 32, 33, 34, 35]),
@@ -273,7 +313,13 @@ mod test {
         test_srli: ("testsrli.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
         test_sub: ("testsub.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
         test_sw: ("testsw.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
-        test_traps: ("testtraps.s.elf", &[2, 3, 4, 5, 6, 7]),
+        test_traps: (
+            "testtraps.s.elf",
+            &[
+                2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+                25, 26, 27, 28,
+            ],
+        ),
         test_xor: ("testxor.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9]),
         test_xori: ("testxori.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10]),
     }

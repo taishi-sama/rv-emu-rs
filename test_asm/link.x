@@ -12,4 +12,5 @@ SECTIONS
   .bss : { *(.bss) }
   . =  ORIGIN(RAM) + LENGTH(RAM) - 0x4;
   .stack : {*(.stack)}
+  __ram_end = ORIGIN(RAM) + LENGTH(RAM);
 }

@@ -1,5 +1,7 @@
 .text
 
+.option push
+.option norvc
 sent_to_uart:
     addi sp, sp, -4; # sp = sp + -4
     sw ra, 0(sp)
@@ -19,6 +21,16 @@ stop_by_fault:
     csrw mtvec, zero
     li a0, 0x0
     lw x0, 0(a0)
+.option pop
+
+#Expected values must not be produced by the instruction under test (compressed li/lui would
+#make e.g. the C.LI and C.LUI tests compare an instruction against itself).
+.macro li_expected reg, value
+    .option push
+    .option norvc
+    li \reg, \value
+    .option pop
+.endm
 
 .macro test_insert_nops amount
 .if \amount
@@ -46,7 +58,7 @@ test_insert_nops \amount-1
 test_\test_num:
     li a1, \first
     li a2, \second
-    li a3, \result
+    li_expected a3, \result
     \instr t0, a1, a2
     beq t0, a3, 1f; # if t0 == a3 then 1f
     fail \test_num
@@ -66,7 +78,7 @@ test_\test_num:
 .macro test_imm_op test_num, instr, result, first, imm
 test_\test_num:
     li a1, \first
-    li a3, \result
+    li_expected a3, \result
     sext_imm \imm x
     \instr t0, a1, x #\imm
     
@@ -97,7 +109,7 @@ test_\test_num:
 
 .macro test_case test_num, check_reg, result
 test_\test_num:
-    li t6, \result
+    li_expected t6, \result
     beq \check_reg, t6, 1f
     fail \test_num
     j 2f
@@ -110,7 +122,7 @@ test_\test_num:
 .macro test_ld_op test_num, instr, result, offset, symbol
 test_\test_num:
     la t2, \symbol
-    li t6, \result
+    li_expected t6, \result
     \instr t0, \offset(t2)
     beq t0, t6, 1f
     fail \test_num
@@ -125,7 +137,7 @@ test_\test_num:
 test_\test_num:
     la t2, \symbol
     li t1, \value
-    li t6, \result
+    li_expected t6, \result
     \st_instr t1, \offset(t2)
     \ld_instr t0, \offset(t2)
     beq t0, t6, 1f

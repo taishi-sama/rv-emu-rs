@@ -1,0 +1,117 @@
+/dts-v1/;
+
+/*
+ * Device tree for rv-emu-rs, modelled on mini-rv32ima's sixtyfourmb.dts.
+ *
+ * Implemented memory map (src/mmu.rs, src/uart.rs, src/primitive_audio.rs):
+ *   0x10000000  UART, write-only transmit byte at offset 0
+ *   0x10000200  audio, i16 samples written as halfwords
+ *   0x80000000  64 MiB of RAM
+ *
+ * The CLINT and the syscon used for poweroff/reboot are present but disabled,
+ * because the MMU does not map those addresses yet. Drop the status property
+ * once they exist.
+ *
+ * Build with: dtc -I dts -O dtb -o rv-emu-rs.dtb rv-emu-rs.dts
+ */
+
+/ {
+	#address-cells = <0x02>;
+	#size-cells = <0x02>;
+	compatible = "rv-emu-rs,nommu";
+	model = "rv-emu-rs,rv32imac";
+
+	chosen {
+		bootargs = "earlycon=uart8250,mmio,0x10000000,1000000 console=ttyS0";
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x00 0x80000000 0x00 0x4000000>;
+	};
+
+	cpus {
+		#address-cells = <0x01>;
+		#size-cells = <0x00>;
+
+		/* time_reader() counts microseconds */
+		timebase-frequency = <0xf4240>;
+
+		cpu0: cpu@0 {
+			device_type = "cpu";
+			reg = <0x00>;
+			status = "okay";
+			compatible = "riscv";
+			/* misa reads as 0x50001105 */
+			riscv,isa = "rv32imac";
+			mmu-type = "riscv,none";
+
+			cpu_intc: interrupt-controller {
+				#interrupt-cells = <0x01>;
+				interrupt-controller;
+				compatible = "riscv,cpu-intc";
+			};
+		};
+
+		cpu-map {
+			cluster0 {
+				core0 {
+					cpu = <&cpu0>;
+				};
+			};
+		};
+	};
+
+	soc {
+		#address-cells = <0x02>;
+		#size-cells = <0x02>;
+		compatible = "simple-bus";
+		ranges;
+
+		/*
+		 * The compatible string intentionally matches no driver: the 8250
+		 * driver would probe registers this UART does not answer, so the
+		 * console comes from earlycon instead.
+		 */
+		uart@10000000 {
+			clock-frequency = <0x1000000>;
+			reg = <0x00 0x10000000 0x00 0x100>;
+			compatible = "ns16850";
+		};
+
+		/* Halfword writes queue one 44100 Hz stereo i16 sample. */
+		audio@10000200 {
+			reg = <0x00 0x10000200 0x00 0x04>;
+			compatible = "rv-emu-rs,primitive-audio";
+		};
+
+		clint@11000000 {
+			status = "disabled";
+			interrupts-extended = <&cpu_intc 0x03 &cpu_intc 0x07>;
+			reg = <0x00 0x11000000 0x00 0x10000>;
+			compatible = "sifive,clint0", "riscv,clint0";
+		};
+
+		syscon0: syscon@11100000 {
+			status = "disabled";
+			reg = <0x00 0x11100000 0x00 0x1000>;
+			compatible = "syscon";
+		};
+
+		poweroff {
+			status = "disabled";
+			value = <0x5555>;
+			offset = <0x00>;
+			regmap = <&syscon0>;
+			compatible = "syscon-poweroff";
+		};
+
+		reboot {
+			status = "disabled";
+			value = <0x7777>;
+			offset = <0x00>;
+			regmap = <&syscon0>;
+			compatible = "syscon-reboot";
+		};
+	};
+};

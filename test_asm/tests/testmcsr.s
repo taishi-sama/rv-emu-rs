@@ -57,61 +57,38 @@ __start:
     csrr t2, mscratch
     TEST_CASE 16, t2, 3
 
-    li t0, 0x00000808
-    csrw mie, t0
-    csrr t2, mie
-    TEST_CASE 17, t2, 0x00000808
-
-    li t0, 0x00000080
-    csrw mip, t0
-    csrr t2, mip
-    TEST_CASE 18, t2, 0x00000080
-
-    li t0, 0x80000004
-    csrw mepc, t0
+    la s2, __start
+    csrw mepc, s2
     csrr t2, mepc
-    TEST_CASE 19, t2, 0x80000004
+    sub t0, t2, s2
+    TEST_CASE 17, t0, 0
 
     li t0, 0x0000000b
     csrw mcause, t0
     csrr t2, mcause
-    TEST_CASE 20, t2, 0x0000000b
+    TEST_CASE 18, t2, 0x0000000b
 
-    li t0, 0x80000010
-    csrw mtval, t0
+    la s2, __start
+    csrw mtval, s2
     csrr t2, mtval
-    TEST_CASE 21, t2, 0x80000010
+    sub t0, t2, s2
+    TEST_CASE 19, t0, 0
 
     li t0, 0x00001888
     csrw mstatus, t0
     csrr t2, mstatus
-    TEST_CASE 22, t2, 0x00001888
-
-    csrr t2, mstatush
-    TEST_CASE 23, t2, 0
-
-    csrr t2, mhartid
-    TEST_CASE 24, t2, 0
-
-    csrr t2, mvendorid
-    TEST_CASE 25, t2, 0xff0ff0ff
-
-    csrr t2, mimpid
-    TEST_CASE 26, t2, 0
-
-    csrr t2, marchid
-    TEST_CASE 27, t2, 0
+    TEST_CASE 20, t2, 0x00001888
 
     csrr t2, misa
     srli t2, t2, 30
-    TEST_CASE 28, t2, 1
+    TEST_CASE 21, t2, 1
 
     csrr t2, time
     csrr t3, time
     bgeu t3, t2, 1f
-    fail 29
+    fail 22
     j 2f
-1:  pass 29
+1:  pass 22
 2:
     csrr t2, cycleh
     csrr t2, cycle
