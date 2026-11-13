@@ -1,6 +1,7 @@
 use crate::{
     clint::{Clint, CLINT_ADDRESS, CLINT_ADDRESS_END},
     primitive_audio::{self, PrimitiveAudioProducer, PrimitiveAudioReceiver},
+    syscon::{Syscon, SYSCON_ADDRESS, SYSCON_ADDRESS_END},
     traps::{Trap, TrapType},
     uart::UART,
 };
@@ -29,6 +30,7 @@ pub struct MemoryBus {
     pub uart: UART,
     pub audio: PrimitiveAudioReceiver,
     pub clint: Clint,
+    pub syscon: Syscon,
 }
 
 impl MemoryBus {
@@ -41,6 +43,7 @@ impl MemoryBus {
                 uart: UART::new(),
                 audio: audio_res,
                 clint: Clint::new(),
+                syscon: Syscon::new(),
             },
             audio_prod,
         )
@@ -120,6 +123,7 @@ impl MemoryBus {
             }
             PRIMITIVE_AUDIO_ADDRESS => Ok(self.audio.get_size()),
             CLINT_ADDRESS..=CLINT_ADDRESS_END => self.clint.read_word(address),
+            SYSCON_ADDRESS..=SYSCON_ADDRESS_END => self.syscon.read_word(address),
             _ => Err(Trap {
                 tcause: TrapType::LoadAccessFault,
                 tval: address,
@@ -181,6 +185,7 @@ impl MemoryBus {
                 todo!("Audio word writes are not implemented")
             }
             CLINT_ADDRESS..=CLINT_ADDRESS_END => self.clint.write_word(address, word),
+            SYSCON_ADDRESS..=SYSCON_ADDRESS_END => self.syscon.write_word(address, word),
             _ => Err(Trap {
                 tcause: TrapType::StoreAccessFault,
                 tval: address,

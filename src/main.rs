@@ -7,6 +7,7 @@ use std::{
 use bus::MemoryBus;
 use mmu::MMU;
 use rodio::{OutputStream, Source};
+use syscon::SysconEvent;
 
 pub mod bus;
 pub mod clint;
@@ -18,6 +19,7 @@ pub mod manual_debugger;
 pub mod mmu;
 pub mod ops_decode;
 pub mod primitive_audio;
+pub mod syscon;
 pub mod traps;
 pub mod uart;
 //pub mod gdb;
@@ -88,6 +90,15 @@ fn main() {
                 println!("Encountered error! {trap:?}");
                 break;
             }
+        }
+
+        if let Some(event) = emu.take_syscon_event() {
+            match event {
+                SysconEvent::PowerOff => println!("Poweroff requested"),
+                //TODO: restart from the loaded ELF instead of exiting.
+                SysconEvent::Reboot => println!("Reboot requested"),
+            }
+            break;
         }
 
         // if counter%100000000 == 0 {
@@ -171,6 +182,9 @@ mod test {
                 break;
             }
             steps += 1;
+            if emu.take_syscon_event().is_some() {
+                break;
+            }
         }
         assert!(
             steps < MAX_STEPS,

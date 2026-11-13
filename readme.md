@@ -9,7 +9,7 @@ Current target instruction set is rv32imac(unfinished), have plans to implement 
 https://github.com/user-attachments/assets/7547b81b-a22c-4d94-8c82-70087b4962d8
 
 
-Devices list contains a write-only simple UART device, a write-only audio device with fixed rate and format, and a CLINT providing msip, mtimecmp and mtime. Will be extended in the future.
+Devices list contains a write-only simple UART device, a write-only audio device with fixed rate and format, a CLINT and a syscon. Will be extended in the future.
 
 
 # Credits 
