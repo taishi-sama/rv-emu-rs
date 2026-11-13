@@ -1,8 +1,4 @@
-use crate::traps::{Trap, TrapType};
-
-pub const SYSCON_ADDRESS: u32 = 0x11100000;
-pub const SYSCON_SIZE: usize = 0x1000;
-pub const SYSCON_ADDRESS_END: u32 = SYSCON_ADDRESS + SYSCON_SIZE as u32 - 1;
+use crate::{mmdevice::MMdevice, traps::TrapType};
 
 const POWEROFF_VALUE: u32 = 0x5555;
 const REBOOT_VALUE: u32 = 0x7777;
@@ -30,19 +26,28 @@ impl Syscon {
     pub fn take_event(&mut self) -> Option<SysconEvent> {
         self.event.take()
     }
-    pub fn read_word(&self, address: u32) -> Result<u32, Trap> {
-        debug_assert!(matches!(address, SYSCON_ADDRESS..=SYSCON_ADDRESS_END));
-        match address.wrapping_sub(SYSCON_ADDRESS) {
+}
+
+impl MMdevice for Syscon {
+    const MEMORY_REGION_SIZE: u32 = 0x1000;
+
+    fn fetch_halfword(&mut self, _offset: u32) -> Result<u16, TrapType> {
+        Err(TrapType::InstructionAccessFault)
+    }
+    fn read_word_atomically(&mut self, _offset: u32) -> Result<u32, TrapType> {
+        Err(TrapType::LoadAccessFault)
+    }
+    fn write_word_atomically(&mut self, _offset: u32, _word: u32) -> Result<(), TrapType> {
+        Err(TrapType::StoreAccessFault)
+    }
+    fn read_word(&mut self, offset: u32) -> Result<u32, TrapType> {
+        match offset {
             0 => Ok(self.value),
-            _ => Err(Trap {
-                tcause: TrapType::LoadAccessFault,
-                tval: address,
-            }),
+            _ => Err(TrapType::LoadAccessFault),
         }
     }
-    pub fn write_word(&mut self, address: u32, value: u32) -> Result<(), Trap> {
-        debug_assert!(matches!(address, SYSCON_ADDRESS..=SYSCON_ADDRESS_END));
-        match address.wrapping_sub(SYSCON_ADDRESS) {
+    fn write_word(&mut self, offset: u32, value: u32) -> Result<(), TrapType> {
+        match offset {
             0 => {
                 self.value = value;
                 let event = match value {
@@ -54,10 +59,19 @@ impl Syscon {
                 self.event.get_or_insert(event);
                 Ok(())
             }
-            _ => Err(Trap {
-                tcause: TrapType::StoreAccessFault,
-                tval: address,
-            }),
+            _ => Err(TrapType::StoreAccessFault),
         }
+    }
+    fn read_halfword(&mut self, _offset: u32) -> Result<u16, TrapType> {
+        Err(TrapType::LoadAccessFault)
+    }
+    fn write_halfword(&mut self, _offset: u32, _halfword: u16) -> Result<(), TrapType> {
+        Err(TrapType::StoreAccessFault)
+    }
+    fn read_byte(&mut self, _offset: u32) -> Result<u8, TrapType> {
+        Err(TrapType::LoadAccessFault)
+    }
+    fn write_byte(&mut self, _offset: u32, _byte: u8) -> Result<(), TrapType> {
+        Err(TrapType::StoreAccessFault)
     }
 }

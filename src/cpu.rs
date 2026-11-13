@@ -1,7 +1,7 @@
 use std::sync::{atomic::AtomicBool, Arc};
 
 use crate::{
-    bus::{AtomicAccess, RAM_ADDRESS, RAM_SIZE},
+    bus::{AtomicAccess, RAM_ADDRESS},
     errors::EmulatorError,
     mmu::MMU,
     ops_decode::{
@@ -15,6 +15,7 @@ use crate::{
         get_funct7, get_imm_b_type, get_imm_i_type, get_imm_j_type, get_imm_s_type, get_imm_u_type,
         get_opcode, get_rd, get_rs1, get_rs2, get_rs3,
     },
+    ram::RAM_SIZE,
     traps::{Trap, TrapType},
 };
 

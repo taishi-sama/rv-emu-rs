@@ -1,10 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::traps::{Trap, TrapType};
-
-pub const UART_ADDRESS: u32 = 0x10000000;
-const UART_REGION_SIZE: usize = 0x100;
-pub const UART_ADDRESS_END: u32 = UART_ADDRESS + UART_REGION_SIZE as u32 - 1;
+use crate::{mmdevice::MMdevice, traps::TrapType};
 
 pub const MAX_BUFFER: usize = 1 << 16;
 
@@ -84,8 +80,33 @@ impl UART {
             fifo | 0x01 //no interrupt pending
         }
     }
-    pub fn read_byte(&mut self, address: u32) -> Result<u8, Trap> {
-        let offset = address.wrapping_sub(UART_ADDRESS);
+}
+
+impl MMdevice for UART {
+    const MEMORY_REGION_SIZE: u32 = 0x100;
+
+    fn fetch_halfword(&mut self, _offset: u32) -> Result<u16, TrapType> {
+        Err(TrapType::InstructionAccessFault)
+    }
+    fn read_word_atomically(&mut self, _offset: u32) -> Result<u32, TrapType> {
+        Err(TrapType::LoadAccessFault)
+    }
+    fn write_word_atomically(&mut self, _offset: u32, _word: u32) -> Result<(), TrapType> {
+        Err(TrapType::StoreAccessFault)
+    }
+    fn read_word(&mut self, _offset: u32) -> Result<u32, TrapType> {
+        Err(TrapType::LoadAccessFault)
+    }
+    fn write_word(&mut self, _offset: u32, _word: u32) -> Result<(), TrapType> {
+        Err(TrapType::StoreAccessFault)
+    }
+    fn read_halfword(&mut self, _offset: u32) -> Result<u16, TrapType> {
+        Err(TrapType::LoadAccessFault)
+    }
+    fn write_halfword(&mut self, _offset: u32, _halfword: u16) -> Result<(), TrapType> {
+        Err(TrapType::StoreAccessFault)
+    }
+    fn read_byte(&mut self, offset: u32) -> Result<u8, TrapType> {
         let dlab = self.lcr & 0x80 != 0;
         match offset {
             RBR_THR if dlab => Ok(self.dll),
@@ -98,14 +119,10 @@ impl UART {
             LSR => Ok(self.lsr()),
             MSR => Ok(0),
             SCR => Ok(self.scr),
-            _ => Err(Trap {
-                tcause: TrapType::LoadAccessFault,
-                tval: address,
-            }),
+            _ => Err(TrapType::LoadAccessFault),
         }
     }
-    pub fn write_byte(&mut self, address: u32, byte: u8) -> Result<(), Trap> {
-        let offset = address.wrapping_sub(UART_ADDRESS);
+    fn write_byte(&mut self, offset: u32, byte: u8) -> Result<(), TrapType> {
         let dlab = self.lcr & 0x80 != 0;
         match offset {
             RBR_THR if dlab => self.dll = byte,
@@ -131,12 +148,7 @@ impl UART {
             //LSR and MSR are read-only.
             LSR | MSR => {}
             SCR => self.scr = byte,
-            _ => {
-                return Err(Trap {
-                    tcause: TrapType::StoreAccessFault,
-                    tval: address,
-                })
-            }
+            _ => return Err(TrapType::StoreAccessFault),
         }
         Ok(())
     }

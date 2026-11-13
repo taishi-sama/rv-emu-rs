@@ -1,8 +1,5 @@
 use crate::{
-    bus::{RAM_ADDRESS, RAM_SIZE},
-    cpu::CPU,
-    elf_analyzer::elf_setup_bus,
-    mmu::MMU,
+    bus::RAM_ADDRESS, cpu::CPU, elf_analyzer::elf_setup_bus, mmu::MMU, ram::RAM_SIZE,
     syscon::SysconEvent,
 };
 

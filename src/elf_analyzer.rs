@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::bus::MemoryBus;
+use crate::bus::{MemoryBus, RAM_ADDRESS};
 
 /// ELF header
 pub struct Header {
@@ -775,7 +775,7 @@ pub fn elf_setup_bus(elf: Vec<u8>, bus: &mut MemoryBus) -> u32 {
         let sh_offset = program_data_section_headers[i].sh_offset as usize;
         let sh_size = program_data_section_headers[i].sh_size as usize;
         //println!("{:x}", program_data_section_headers[i].sh_addr);
-        if sh_addr >= 0x80000000 && sh_size > 0 {
+        if sh_addr >= RAM_ADDRESS as u64 && sh_size > 0 {
             for j in 0..sh_size {
                 assert!(bus.write_raw_to_ram(
                     (sh_addr + j as u64) as u32,

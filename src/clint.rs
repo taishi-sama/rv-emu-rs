@@ -1,10 +1,6 @@
 use std::time::Instant;
 
-use crate::traps::{Trap, TrapType};
-
-pub const CLINT_ADDRESS: u32 = 0x11000000;
-pub const CLINT_SIZE: usize = 0x10000;
-pub const CLINT_ADDRESS_END: u32 = CLINT_ADDRESS + CLINT_SIZE as u32 - 1;
+use crate::{mmdevice::MMdevice, traps::TrapType};
 
 const MSIP_OFFSET: u32 = 0x0000;
 const MTIMECMP_OFFSET: u32 = 0x4000;
@@ -49,26 +45,32 @@ impl Clint {
     pub fn mtip(&self) -> bool {
         self.mtime() >= self.banks[0].mtimecmp
     }
-    //Only 32 bit accesses are defined for the CLINT.
-    pub fn read_word(&self, address: u32) -> Result<u32, Trap> {
-        debug_assert!(matches!(address, CLINT_ADDRESS..=CLINT_ADDRESS_END));
-        Ok(match address.wrapping_sub(CLINT_ADDRESS) {
+}
+
+impl MMdevice for Clint {
+    const MEMORY_REGION_SIZE: u32 = 0x10000;
+
+    fn fetch_halfword(&mut self, _offset: u32) -> Result<u16, TrapType> {
+        Err(TrapType::InstructionAccessFault)
+    }
+    fn read_word_atomically(&mut self, _offset: u32) -> Result<u32, TrapType> {
+        Err(TrapType::LoadAccessFault)
+    }
+    fn write_word_atomically(&mut self, _offset: u32, _word: u32) -> Result<(), TrapType> {
+        Err(TrapType::StoreAccessFault)
+    }
+    fn read_word(&mut self, offset: u32) -> Result<u32, TrapType> {
+        Ok(match offset {
             MSIP_OFFSET => self.banks[0].msip as u32,
             MTIMECMP_OFFSET => self.banks[0].mtimecmp as u32,
             MTIMECMP_HIGH_OFFSET => (self.banks[0].mtimecmp >> 32) as u32,
             MTIME_OFFSET => self.mtime() as u32,
             MTIME_HIGH_OFFSET => (self.mtime() >> 32) as u32,
-            _ => {
-                return Err(Trap {
-                    tcause: TrapType::LoadAccessFault,
-                    tval: address,
-                })
-            }
+            _ => return Err(TrapType::LoadAccessFault),
         })
     }
-    pub fn write_word(&mut self, address: u32, value: u32) -> Result<(), Trap> {
-        debug_assert!(matches!(address, CLINT_ADDRESS..=CLINT_ADDRESS_END));
-        match address.wrapping_sub(CLINT_ADDRESS) {
+    fn write_word(&mut self, offset: u32, value: u32) -> Result<(), TrapType> {
+        match offset {
             MSIP_OFFSET => self.banks[0].msip = value & 1 != 0,
             MTIMECMP_OFFSET => {
                 self.banks[0].mtimecmp = (self.banks[0].mtimecmp & !0xffff_ffff) | value as u64
@@ -79,13 +81,20 @@ impl Clint {
             }
             //mtime is derived from the host clock, so guest writes cannot change it
             MTIME_OFFSET | MTIME_HIGH_OFFSET => {}
-            _ => {
-                return Err(Trap {
-                    tcause: TrapType::StoreAccessFault,
-                    tval: address,
-                })
-            }
+            _ => return Err(TrapType::StoreAccessFault),
         }
         Ok(())
+    }
+    fn read_halfword(&mut self, _offset: u32) -> Result<u16, TrapType> {
+        Err(TrapType::LoadAccessFault)
+    }
+    fn write_halfword(&mut self, _offset: u32, _halfword: u16) -> Result<(), TrapType> {
+        Err(TrapType::StoreAccessFault)
+    }
+    fn read_byte(&mut self, _offset: u32) -> Result<u8, TrapType> {
+        Err(TrapType::LoadAccessFault)
+    }
+    fn write_byte(&mut self, _offset: u32, _byte: u8) -> Result<(), TrapType> {
+        Err(TrapType::StoreAccessFault)
     }
 }
