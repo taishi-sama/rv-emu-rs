@@ -47,12 +47,12 @@ const MSTATUS_MPIE: u32 = 1 << 7;
 const MSTATUS_SPP: u32 = 1 << 8;
 const MSTATUS_MPP_SHIFT: u32 = 11;
 const MSTATUS_MPRV: u32 = 1 << 17;
-const MSTATUS_MXR: u32 = 1 << 19;
+pub(crate) const MSTATUS_SUM: u32 = 1 << 18;
+pub(crate) const MSTATUS_MXR: u32 = 1 << 19;
 const MSTATUS_TVM: u32 = 1 << 20;
 const MSTATUS_TW: u32 = 1 << 21;
 const MSTATUS_TSR: u32 = 1 << 22;
-//SUM is read-only zero while satp.MODE is read-only zero; Sv32 will make it writable.
-const SSTATUS_MASK: u32 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_MXR;
+const SSTATUS_MASK: u32 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM | MSTATUS_MXR;
 const MSTATUS_MASK: u32 = MSTATUS_MIE
     | MSTATUS_MPIE
     | (0b11 << MSTATUS_MPP_SHIFT)
@@ -117,7 +117,6 @@ pub struct CPUState {
     pub scause: u32,
     pub stval: u32,
     pub sscratch: u32,
-    pub satp: u32,
     pub medeleg: u32,
     pub mideleg: u32,
     pub mcounteren: u32,
@@ -157,10 +156,29 @@ impl CPU {
     }
     //pub fn run_debugger(&mut self) {}
     pub fn execute_instruction(&mut self) -> Result<u32, Trap> {
+        #[cfg(feature = "mmu-context-check")]
+        assert!(
+            self.mmu
+                .context_matches(self.state.privilege, self.state.mstatus),
+            "MMU translation context is out of sync with CPU state"
+        );
         let instr = self.fetch()?;
         let instr_len = self.execute(instr)? as u32;
         self.state.pc = self.state.pc.wrapping_add(instr_len);
         Ok(instr)
+    }
+    //The privilege level exists in both CPUState (for trap routing) and the MMU (for permission
+    //checks); this is the only place that moves it. mstatus.SUM/MXR are synced separately through
+    //set_mstatus when mstatus changes.
+    fn set_privilege(&mut self, privilege: PrivilegeMode) {
+        self.state.privilege = privilege;
+        self.mmu.set_privilege(privilege);
+    }
+    //The MMU caches SUM and MXR from mstatus for its permission checks; every mstatus write goes
+    //through here so the two views cannot drift apart.
+    fn set_mstatus(&mut self, mstatus: u32) {
+        self.state.mstatus = (self.state.mstatus & 0xffff_ffff_0000_0000) | mstatus as u64;
+        self.mmu.update_from_mstatus(self.state.mstatus);
     }
     pub fn step(&mut self) -> Result<u32, EmulatorError> {
         //Waking from WFI and taking the boundary-polled interrupt happen in handle_interrupt;
@@ -180,7 +198,7 @@ impl CPU {
                 return Ok(v);
             }
             Err(t) => {
-                self.state.process_trap(t)?;
+                self.process_trap(t)?;
                 return Ok(0);
             }
         }
@@ -240,7 +258,7 @@ impl CPU {
         if machine_enabled {
             for (bit, cause) in INTERRUPT_PRIORITY {
                 if machine & bit != 0 {
-                    return self.state.process_trap(Trap {
+                    return self.process_trap(Trap {
                         tcause: cause,
                         tval: 0,
                     });
@@ -250,7 +268,7 @@ impl CPU {
         if supervisor_enabled {
             for (bit, cause) in INTERRUPT_PRIORITY {
                 if supervisor & bit != 0 {
-                    return self.state.process_trap(Trap {
+                    return self.process_trap(Trap {
                         tcause: cause,
                         tval: 0,
                     });
@@ -428,11 +446,11 @@ impl CPU {
                             //SFENCE.VMA takes rs1/rs2 operands and requires rd=0. All four
                             //operand combinations are valid, and over-fencing is always legal.
                             if get_rd(instr) == 0 && get_funct7(instr) == 0b0001001 {
-                                Self::sfence_vma(&mut self.state, instr)
+                                Self::sfence_vma(&mut self.state, &mut self.mmu, instr)
                             } else if get_rs1(instr) == 0 && get_rd(instr) == 0 {
                                 match a {
-                                    0b000100000010 => Self::sret(&mut self.state, instr),
-                                    0b001100000010 => Self::mret(&mut self.state, instr),
+                                    0b000100000010 => self.sret(instr),
+                                    0b001100000010 => self.mret(instr),
                                     0b000100000101 => Self::wfi(&mut self.state, instr),
                                     _ => Err(Trap {
                                         tcause: crate::traps::TrapType::IllegalInstruction,
@@ -447,12 +465,12 @@ impl CPU {
                             }
                         }
                     },
-                    0b001 => Self::csrrw(&mut self.state, &mut self.mmu, instr),
-                    0b010 => Self::csrrs(&mut self.state, &mut self.mmu, instr),
-                    0b011 => Self::csrrc(&mut self.state, &mut self.mmu, instr),
-                    0b101 => Self::csrrwi(&mut self.state, &mut self.mmu, instr),
-                    0b110 => Self::csrrsi(&mut self.state, &mut self.mmu, instr),
-                    0b111 => Self::csrrci(&mut self.state, &mut self.mmu, instr),
+                    0b001 => self.csrrw(instr),
+                    0b010 => self.csrrs(instr),
+                    0b011 => self.csrrc(instr),
+                    0b101 => self.csrrwi(instr),
+                    0b110 => self.csrrsi(instr),
+                    0b111 => self.csrrci(instr),
                     _ => Err(Trap {
                         tcause: crate::traps::TrapType::IllegalInstruction,
                         tval: instr,
@@ -979,8 +997,8 @@ impl CPU {
             PrivilegeMode::User => state.mcounteren & bit != 0 && state.scounteren & bit != 0,
         }
     }
-    fn get_csr(state: &CPUState, mmu: &mut MMU, csr: u16) -> Result<u32, Trap> {
-        if !Self::csr_privilege_ok(state, csr) {
+    fn get_csr(&mut self, csr: u16) -> Result<u32, Trap> {
+        if !Self::csr_privilege_ok(&self.state, csr) {
             return Err(Trap {
                 tcause: TrapType::IllegalInstruction,
                 tval: 0,
@@ -991,15 +1009,15 @@ impl CPU {
             0xC01 | 0xC81 => COUNTEREN_TM,
             _ => 0,
         };
-        if counter_bit != 0 && !Self::counter_access_allowed(state, counter_bit) {
+        if counter_bit != 0 && !Self::counter_access_allowed(&self.state, counter_bit) {
             return Err(Trap {
                 tcause: TrapType::IllegalInstruction,
                 tval: 0,
             });
         }
         if csr == 0x180
-            && state.privilege == PrivilegeMode::Supervisor
-            && state.mstatus as u32 & MSTATUS_TVM != 0
+            && self.state.privilege == PrivilegeMode::Supervisor
+            && self.state.mstatus as u32 & MSTATUS_TVM != 0
         {
             return Err(Trap {
                 tcause: TrapType::IllegalInstruction,
@@ -1007,40 +1025,44 @@ impl CPU {
             });
         }
         Ok(match csr {
-            0x100 => state.mstatus as u32 & SSTATUS_MASK, //sstatus
-            0x104 => state.mie & SUPERVISOR_INTERRUPT_MASK & state.mideleg, //sie
-            0x105 => state.stvec,
-            0x106 => state.scounteren,
+            0x100 => self.state.mstatus as u32 & SSTATUS_MASK, //sstatus
+            0x104 => self.state.mie & SUPERVISOR_INTERRUPT_MASK & self.state.mideleg, //sie
+            0x105 => self.state.stvec,
+            0x106 => self.state.scounteren,
             0x10A => 0, //senvcfg; all fields are read-only zero here
-            0x140 => state.sscratch,
-            0x141 => state.sepc,
-            0x142 => state.scause,
-            0x143 => state.stval,
-            0x144 => Self::pending_mip(state, mmu) & SUPERVISOR_INTERRUPT_MASK & state.mideleg, //sip
-            0x180 => state.satp,
-            0x300 => state.mstatus as u32, //mstatus
-            0x301 => MISA,                 //misa
-            0x302 => state.medeleg,
-            0x303 => state.mideleg,
-            0x304 => state.mie,
-            0x305 => state.mtvec,
-            0x306 => state.mcounteren,
+            0x140 => self.state.sscratch,
+            0x141 => self.state.sepc,
+            0x142 => self.state.scause,
+            0x143 => self.state.stval,
+            0x144 => {
+                Self::pending_mip(&self.state, &mut self.mmu)
+                    & SUPERVISOR_INTERRUPT_MASK
+                    & self.state.mideleg
+            } //sip
+            0x180 => self.mmu.satp(),
+            0x300 => self.state.mstatus as u32, //mstatus
+            0x301 => MISA,                      //misa
+            0x302 => self.state.medeleg,
+            0x303 => self.state.mideleg,
+            0x304 => self.state.mie,
+            0x305 => self.state.mtvec,
+            0x306 => self.state.mcounteren,
             0x30A => 0, //menvcfg; all fields are read-only zero here
             0x310 => 0, //mstatush; little-endian only, MBE and SBE are read-only zero
             0x31A => 0, //menvcfgh
-            0x340 => state.mscratch,
-            0x341 => state.mepc,
-            0x342 => state.mcause,
-            0x343 => state.mtval,
-            0x344 => Self::pending_mip(state, mmu), //mip
-            0x3a0..=0x3a3 => state.pmpcfg[(csr - 0x3a0) as usize],
-            0x3b0..=0x3bf => state.pmpaddr[(csr - 0x3b0) as usize],
-            0xC00 => state.cycle as u32,
-            0xC01 => mmu.mtime() as u32,         //time
-            0xC80 => (state.cycle >> 32) as u32, //cycleh
-            0xC81 => (mmu.mtime() >> 32) as u32, //timeh
-            0xf11 => 0xff0ff0ff,                 //vendorId
-            0xf12..=0xf15 => 0,                  //marchid, mimpid, mhartid, mconfigptr
+            0x340 => self.state.mscratch,
+            0x341 => self.state.mepc,
+            0x342 => self.state.mcause,
+            0x343 => self.state.mtval,
+            0x344 => Self::pending_mip(&self.state, &mut self.mmu), //mip
+            0x3a0..=0x3a3 => self.state.pmpcfg[(csr - 0x3a0) as usize],
+            0x3b0..=0x3bf => self.state.pmpaddr[(csr - 0x3b0) as usize],
+            0xC00 => self.state.cycle as u32,
+            0xC01 => self.mmu.mtime() as u32,         //time
+            0xC80 => (self.state.cycle >> 32) as u32, //cycleh
+            0xC81 => (self.mmu.mtime() >> 32) as u32, //timeh
+            0xf11 => 0xff0ff0ff,                      //vendorId
+            0xf12..=0xf15 => 0,                       //marchid, mimpid, mhartid, mconfigptr
             _ => {
                 return Err(Trap {
                     tcause: TrapType::IllegalInstruction,
@@ -1049,16 +1071,16 @@ impl CPU {
             }
         })
     }
-    fn set_csr(state: &mut CPUState, csr: u16, new_val: u32) -> Result<(), Trap> {
-        if !Self::csr_privilege_ok(state, csr) || (csr >> 10) & 0b11 == 0b11 {
+    fn set_csr(&mut self, csr: u16, new_val: u32) -> Result<(), Trap> {
+        if !Self::csr_privilege_ok(&self.state, csr) || (csr >> 10) & 0b11 == 0b11 {
             return Err(Trap {
                 tcause: TrapType::IllegalInstruction,
                 tval: 0,
             });
         }
         if csr == 0x180
-            && state.privilege == PrivilegeMode::Supervisor
-            && state.mstatus as u32 & MSTATUS_TVM != 0
+            && self.state.privilege == PrivilegeMode::Supervisor
+            && self.state.mstatus as u32 & MSTATUS_TVM != 0
         {
             return Err(Trap {
                 tcause: TrapType::IllegalInstruction,
@@ -1067,34 +1089,32 @@ impl CPU {
         }
         match csr {
             0x100 => {
-                let sstatus = (state.mstatus as u32 & !SSTATUS_MASK) | (new_val & SSTATUS_MASK);
-                state.mstatus = (state.mstatus & 0xffff_ffff_0000_0000) | sstatus as u64;
-                state.resample_interrupts = true
+                let sstatus =
+                    (self.state.mstatus as u32 & !SSTATUS_MASK) | (new_val & SSTATUS_MASK);
+                self.set_mstatus(sstatus);
+                self.state.resample_interrupts = true
             } //sstatus
             0x104 => {
                 //Bits not delegated by mideleg are read-only zero in sie.
-                let mask = SUPERVISOR_INTERRUPT_MASK & state.mideleg;
-                state.mie = (state.mie & !mask) | (new_val & mask);
-                state.resample_interrupts = true
+                let mask = SUPERVISOR_INTERRUPT_MASK & self.state.mideleg;
+                self.state.mie = (self.state.mie & !mask) | (new_val & mask);
+                self.state.resample_interrupts = true
             } //sie
-            0x105 => state.stvec = new_val & !0b11, //Only direct mode is implemented
-            0x106 => state.scounteren = new_val,
+            0x105 => self.state.stvec = new_val & !0b11, //Only direct mode is implemented
+            0x106 => self.state.scounteren = new_val,
             0x10A => {} //senvcfg; all fields are read-only zero here
-            0x140 => state.sscratch = new_val,
-            0x141 => state.sepc = new_val & !1,
-            0x142 => state.scause = new_val,
-            0x143 => state.stval = new_val,
+            0x140 => self.state.sscratch = new_val,
+            0x141 => self.state.sepc = new_val & !1,
+            0x142 => self.state.scause = new_val,
+            0x143 => self.state.stval = new_val,
             //Only SSIP is writable in sip, and only when it is delegated.
             0x144 => {
-                let mask = INTERRUPT_SSI & state.mideleg;
-                state.mip = (state.mip & !mask) | (new_val & mask);
-                state.resample_interrupts = true
+                let mask = INTERRUPT_SSI & self.state.mideleg;
+                self.state.mip = (self.state.mip & !mask) | (new_val & mask);
+                self.state.resample_interrupts = true
             }
             0x180 => {
-                //Unsupported MODE values leave satp entirely unchanged (WARL).
-                if new_val >> 31 == 0 {
-                    state.satp = new_val
-                }
+                self.mmu.set_satp(new_val)
             } //satp
             0x300 => {
                 let mut mstatus = new_val & MSTATUS_MASK;
@@ -1102,35 +1122,35 @@ impl CPU {
                 if (mstatus >> MSTATUS_MPP_SHIFT) & 0b11 == 0b10 {
                     mstatus |= 3 << MSTATUS_MPP_SHIFT;
                 }
-                state.mstatus = (state.mstatus & 0xffff_ffff_0000_0000) | mstatus as u64;
-                state.resample_interrupts = true
+                self.set_mstatus(mstatus);
+                self.state.resample_interrupts = true
             } //mstatus
             0x301 => {} //misa is WARL; writes are ignored
-            0x302 => state.medeleg = new_val & MEDELEG_MASK,
+            0x302 => self.state.medeleg = new_val & MEDELEG_MASK,
             0x303 => {
-                state.mideleg = new_val & MIDELEG_MASK;
-                state.resample_interrupts = true
+                self.state.mideleg = new_val & MIDELEG_MASK;
+                self.state.resample_interrupts = true
             }
             0x304 => {
-                state.mie = new_val & IMPLEMENTED_INTERRUPT_MASK;
-                state.resample_interrupts = true
+                self.state.mie = new_val & IMPLEMENTED_INTERRUPT_MASK;
+                self.state.resample_interrupts = true
             }
-            0x305 => state.mtvec = new_val & !0b11, //Only direct mode is implemented
-            0x306 => state.mcounteren = new_val,
+            0x305 => self.state.mtvec = new_val & !0b11, //Only direct mode is implemented
+            0x306 => self.state.mcounteren = new_val,
             0x30A => {} //menvcfg; all fields are read-only zero here
             0x310 => {} //mstatush; MBE and SBE are read-only zero
             0x31A => {} //menvcfgh
-            0x340 => state.mscratch = new_val,
-            0x341 => state.mepc = new_val & !1,
-            0x342 => state.mcause = new_val,
-            0x343 => state.mtval = new_val,
+            0x340 => self.state.mscratch = new_val,
+            0x341 => self.state.mepc = new_val & !1,
+            0x342 => self.state.mcause = new_val,
+            0x343 => self.state.mtval = new_val,
             //MSIP, MTIP and MEIP are device-driven; SSIP, STIP and SEIP are software-writable.
             0x344 => {
-                state.mip = new_val & SUPERVISOR_INTERRUPT_MASK;
-                state.resample_interrupts = true
+                self.state.mip = new_val & SUPERVISOR_INTERRUPT_MASK;
+                self.state.resample_interrupts = true
             }
-            0x3a0..=0x3a3 => state.pmpcfg[(csr - 0x3a0) as usize] = new_val,
-            0x3b0..=0x3bf => state.pmpaddr[(csr - 0x3b0) as usize] = new_val,
+            0x3a0..=0x3a3 => self.state.pmpcfg[(csr - 0x3a0) as usize] = new_val,
+            0x3b0..=0x3bf => self.state.pmpaddr[(csr - 0x3b0) as usize] = new_val,
             _ => {
                 return Err(Trap {
                     tcause: TrapType::IllegalInstruction,
@@ -1140,11 +1160,11 @@ impl CPU {
         }
         Ok(())
     }
-    fn sret(state: &mut CPUState, instr: u32) -> Result<(), Trap> {
-        let mstatus = state.mstatus as u32;
+    fn sret(&mut self, instr: u32) -> Result<(), Trap> {
+        let mstatus = self.state.mstatus as u32;
         //TSR intercepts SRET in S-mode; U-mode may never execute it.
-        if state.privilege == PrivilegeMode::User
-            || (state.privilege == PrivilegeMode::Supervisor && mstatus & MSTATUS_TSR != 0)
+        if self.state.privilege == PrivilegeMode::User
+            || (self.state.privilege == PrivilegeMode::Supervisor && mstatus & MSTATUS_TSR != 0)
         {
             return Err(Trap {
                 tcause: TrapType::IllegalInstruction,
@@ -1160,26 +1180,27 @@ impl CPU {
             sstatus |= MSTATUS_SIE;
         }
         sstatus |= MSTATUS_SPIE;
-        state.mstatus = (state.mstatus & 0xffff_ffff_0000_0000) | sstatus as u64;
-        state.privilege = if spp {
+        self.set_mstatus(sstatus);
+        let privilege = if spp {
             PrivilegeMode::Supervisor
         } else {
             PrivilegeMode::User
         };
-        state.pc = state.sepc.wrapping_sub(4);
+        self.set_privilege(privilege);
+        self.state.pc = self.state.sepc.wrapping_sub(4);
         //Interrupt trap conditions must be re-evaluated immediately after an xRET.
-        state.resample_interrupts = true;
+        self.state.resample_interrupts = true;
         Ok(())
     }
-    fn mret(state: &mut CPUState, instr: u32) -> Result<(), Trap> {
-        if state.privilege != PrivilegeMode::Machine {
+    fn mret(&mut self, instr: u32) -> Result<(), Trap> {
+        if self.state.privilege != PrivilegeMode::Machine {
             return Err(Trap {
                 tcause: TrapType::IllegalInstruction,
                 tval: instr,
             });
         }
         //MIE = MPIE, MPIE = 1, MPP = the least privileged supported mode
-        let mut mstatus = state.mstatus as u32;
+        let mut mstatus = self.state.mstatus as u32;
         let mpie = mstatus & MSTATUS_MPIE != 0;
         let mpp = (mstatus >> MSTATUS_MPP_SHIFT) & 0b11;
         mstatus &= !(MSTATUS_MIE | MSTATUS_MPIE | (0b11 << MSTATUS_MPP_SHIFT));
@@ -1191,18 +1212,19 @@ impl CPU {
             mstatus |= MSTATUS_MIE;
         }
         mstatus |= MSTATUS_MPIE;
-        state.mstatus = (state.mstatus & 0xffff_ffff_0000_0000) | mstatus as u64;
-        state.privilege = match mpp {
+        self.set_mstatus(mstatus);
+        let privilege = match mpp {
             0 => PrivilegeMode::User,
             1 => PrivilegeMode::Supervisor,
             _ => PrivilegeMode::Machine,
         };
-        state.pc = state.mepc.wrapping_sub(4);
+        self.set_privilege(privilege);
+        self.state.pc = self.state.mepc.wrapping_sub(4);
         //Interrupt trap conditions must be re-evaluated immediately after an xRET.
-        state.resample_interrupts = true;
+        self.state.resample_interrupts = true;
         Ok(())
     }
-    fn sfence_vma(state: &mut CPUState, instr: u32) -> Result<(), Trap> {
+    fn sfence_vma(state: &mut CPUState, mmu: &mut MMU, instr: u32) -> Result<(), Trap> {
         //SFENCE.VMA is a supervisor instruction; TVM intercepts it in S-mode.
         let mstatus = state.mstatus as u32;
         if state.privilege == PrivilegeMode::User
@@ -1213,7 +1235,8 @@ impl CPU {
                 tval: instr,
             });
         }
-        //No TLB yet; Sv32 adds the flush. All rs1/rs2 forms are legal and may be over-fenced.
+        //Over-fencing is always legal; every rs1/rs2 combination flushes the whole buffer.
+        mmu.flush_tlb();
         Ok(())
     }
     fn wfi(state: &mut CPUState, instr: u32) -> Result<(), Trap> {
@@ -1232,75 +1255,81 @@ impl CPU {
         state.wfi = true;
         Ok(())
     }
-    fn csrrw(state: &mut CPUState, mmu: &mut MMU, instr: u32) -> Result<(), Trap> {
+    fn csrrw(&mut self, instr: u32) -> Result<(), Trap> {
         let csr = get_csr_num(instr);
         let rs1 = get_rs1(instr);
         let rd = get_rd(instr);
         if rd != 0 {
-            let val = Self::get_csr(state, mmu, csr)?;
-            Self::set_csr(state, csr, state.get_x(rs1))?;
-            state.set_x(rd, val)
+            let val = self.get_csr(csr)?;
+            let value = self.state.get_x(rs1);
+            self.set_csr(csr, value)?;
+            self.state.set_x(rd, val)
         } else {
             //CSRRW with rd=x0 does not read, but it still writes.
-            Self::set_csr(state, csr, state.get_x(rs1))?
+            let value = self.state.get_x(rs1);
+            self.set_csr(csr, value)?
         }
         Ok(())
     }
-    fn csrrs(state: &mut CPUState, mmu: &mut MMU, instr: u32) -> Result<(), Trap> {
+    fn csrrs(&mut self, instr: u32) -> Result<(), Trap> {
         let csr = get_csr_num(instr);
         let rs1 = get_rs1(instr);
         let rd = get_rd(instr);
-        let val = Self::get_csr(state, mmu, csr)?;
+        let val = self.get_csr(csr)?;
         if rs1 != 0 {
-            Self::set_csr(state, csr, val | state.get_x(rs1))?;
+            let value = val | self.state.get_x(rs1);
+            self.set_csr(csr, value)?;
         }
-        state.set_x(rd, val);
+        self.state.set_x(rd, val);
         Ok(())
     }
-    fn csrrc(state: &mut CPUState, mmu: &mut MMU, instr: u32) -> Result<(), Trap> {
+    fn csrrc(&mut self, instr: u32) -> Result<(), Trap> {
         let csr = get_csr_num(instr);
         let rs1 = get_rs1(instr);
         let rd = get_rd(instr);
-        let val = Self::get_csr(state, mmu, csr)?;
+        let val = self.get_csr(csr)?;
         if rs1 != 0 {
-            Self::set_csr(state, csr, val & !state.get_x(rs1))?;
+            let value = val & !self.state.get_x(rs1);
+            self.set_csr(csr, value)?;
         }
-        state.set_x(rd, val);
+        self.state.set_x(rd, val);
         Ok(())
     }
-    fn csrrwi(state: &mut CPUState, mmu: &mut MMU, instr: u32) -> Result<(), Trap> {
+    fn csrrwi(&mut self, instr: u32) -> Result<(), Trap> {
         let csr = get_csr_num(instr);
         let zimm = get_rs1(instr) as u32;
         let rd = get_rd(instr);
         if rd != 0 {
-            let val = Self::get_csr(state, mmu, csr)?;
-            Self::set_csr(state, csr, zimm)?;
-            state.set_x(rd, val)
+            let val = self.get_csr(csr)?;
+            self.set_csr(csr, zimm)?;
+            self.state.set_x(rd, val)
         } else {
-            Self::set_csr(state, csr, zimm)?
+            self.set_csr(csr, zimm)?
         }
         Ok(())
     }
-    fn csrrsi(state: &mut CPUState, mmu: &mut MMU, instr: u32) -> Result<(), Trap> {
+    fn csrrsi(&mut self, instr: u32) -> Result<(), Trap> {
         let csr = get_csr_num(instr);
         let zimm = get_rs1(instr) as u32;
         let rd = get_rd(instr);
-        let val = Self::get_csr(state, mmu, csr)?;
+        let val = self.get_csr(csr)?;
         if zimm != 0 {
-            Self::set_csr(state, csr, val | zimm)?;
+            let value = val | zimm;
+            self.set_csr(csr, value)?;
         }
-        state.set_x(rd, val);
+        self.state.set_x(rd, val);
         Ok(())
     }
-    fn csrrci(state: &mut CPUState, mmu: &mut MMU, instr: u32) -> Result<(), Trap> {
+    fn csrrci(&mut self, instr: u32) -> Result<(), Trap> {
         let csr = get_csr_num(instr);
         let zimm = get_rs1(instr) as u32;
         let rd = get_rd(instr);
-        let val = Self::get_csr(state, mmu, csr)?;
+        let val = self.get_csr(csr)?;
         if zimm != 0 {
-            Self::set_csr(state, csr, val & !zimm)?;
+            let value = val & !zimm;
+            self.set_csr(csr, value)?;
         }
-        state.set_x(rd, val);
+        self.state.set_x(rd, val);
         Ok(())
     }
     fn mul(state: &mut CPUState, instr: u32) -> Result<(), Trap> {
@@ -1703,6 +1732,58 @@ impl CPU {
         let address = state.get_x(2).wrapping_add(uimm);
         mmu.write_word(address, state.get_x(rs2))
     }
+
+    pub fn process_trap(&mut self, trap: Trap) -> Result<(), EmulatorError> {
+        //A trap ends any WFI stall; the handler has to run.
+        self.state.wfi = false;
+        let interrupt = trap.is_interupt();
+        let cause = trap.tcause as u32 & 0x7fff_ffff;
+        //Interrupts have no exception-specific datum; *tval becomes zero.
+        let tval = if interrupt { 0 } else { trap.tval };
+        match self.state.trap_target(cause, interrupt) {
+            PrivilegeMode::Supervisor => {
+                if self.state.stvec == 0 {
+                    return Err(EmulatorError::UnsetTrapHandler);
+                }
+                //SPIE = SIE, SIE = 0, SPP = the privilege that was interrupted
+                let mut sstatus = self.state.mstatus as u32;
+                let sie = sstatus & MSTATUS_SIE != 0;
+                sstatus &= !(MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP);
+                if sie {
+                    sstatus |= MSTATUS_SPIE;
+                }
+                if self.state.privilege == PrivilegeMode::Supervisor {
+                    sstatus |= MSTATUS_SPP;
+                }
+                self.set_mstatus(sstatus);
+                self.state.sepc = self.state.pc;
+                self.state.scause = trap.tcause as u32;
+                self.state.stval = tval;
+                self.set_privilege(PrivilegeMode::Supervisor);
+                self.state.pc = self.state.stvec & !0b11;
+            }
+            _ => {
+                if self.state.mtvec == 0 {
+                    return Err(EmulatorError::UnsetTrapHandler);
+                }
+                //MPIE = MIE, MIE = 0, MPP = the privilege that was interrupted
+                let mut mstatus = self.state.mstatus as u32;
+                let mie = mstatus & MSTATUS_MIE != 0;
+                mstatus &= !(MSTATUS_MIE | MSTATUS_MPIE | (0b11 << MSTATUS_MPP_SHIFT));
+                if mie {
+                    mstatus |= MSTATUS_MPIE;
+                }
+                mstatus |= (self.state.privilege as u32) << MSTATUS_MPP_SHIFT;
+                self.set_mstatus(mstatus);
+                self.state.mepc = self.state.pc;
+                self.state.mcause = trap.tcause as u32;
+                self.state.mtval = tval;
+                self.set_privilege(PrivilegeMode::Machine);
+                self.state.pc = self.state.mtvec & !0b11;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[allow(dead_code)]
@@ -1725,7 +1806,6 @@ impl CPUState {
             scause: 0,
             stval: 0,
             sscratch: 0,
-            satp: 0,
             medeleg: 0,
             mideleg: 0,
             mcounteren: 0,
@@ -1774,57 +1854,6 @@ impl CPUState {
         } else {
             PrivilegeMode::Machine
         }
-    }
-    pub fn process_trap(&mut self, trap: Trap) -> Result<(), EmulatorError> {
-        //A trap ends any WFI stall; the handler has to run.
-        self.wfi = false;
-        let interrupt = trap.is_interupt();
-        let cause = trap.tcause as u32 & 0x7fff_ffff;
-        //Interrupts have no exception-specific datum; *tval becomes zero.
-        let tval = if interrupt { 0 } else { trap.tval };
-        match self.trap_target(cause, interrupt) {
-            PrivilegeMode::Supervisor => {
-                if self.stvec == 0 {
-                    return Err(EmulatorError::UnsetTrapHandler);
-                }
-                //SPIE = SIE, SIE = 0, SPP = the privilege that was interrupted
-                let mut sstatus = self.mstatus as u32;
-                let sie = sstatus & MSTATUS_SIE != 0;
-                sstatus &= !(MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP);
-                if sie {
-                    sstatus |= MSTATUS_SPIE;
-                }
-                if self.privilege == PrivilegeMode::Supervisor {
-                    sstatus |= MSTATUS_SPP;
-                }
-                self.mstatus = (self.mstatus & 0xffff_ffff_0000_0000) | sstatus as u64;
-                self.sepc = self.pc;
-                self.scause = trap.tcause as u32;
-                self.stval = tval;
-                self.privilege = PrivilegeMode::Supervisor;
-                self.pc = self.stvec & !0b11;
-            }
-            _ => {
-                if self.mtvec == 0 {
-                    return Err(EmulatorError::UnsetTrapHandler);
-                }
-                //MPIE = MIE, MIE = 0, MPP = the privilege that was interrupted
-                let mut mstatus = self.mstatus as u32;
-                let mie = mstatus & MSTATUS_MIE != 0;
-                mstatus &= !(MSTATUS_MIE | MSTATUS_MPIE | (0b11 << MSTATUS_MPP_SHIFT));
-                if mie {
-                    mstatus |= MSTATUS_MPIE;
-                }
-                mstatus |= (self.privilege as u32) << MSTATUS_MPP_SHIFT;
-                self.mstatus = (self.mstatus & 0xffff_ffff_0000_0000) | mstatus as u64;
-                self.mepc = self.pc;
-                self.mcause = trap.tcause as u32;
-                self.mtval = tval;
-                self.privilege = PrivilegeMode::Machine;
-                self.pc = self.mtvec & !0b11;
-            }
-        }
-        Ok(())
     }
 }
 

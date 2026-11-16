@@ -3,6 +3,13 @@ name = "rv-emu-rs"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Checks correspondance of CPU and MMU states
+mmu-context-check = []
+
+[profile.release]
+debug = "line-tables-only"
+
 [profile.maxspeed]
 inherits = "release"
 opt-level = 3

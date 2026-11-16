@@ -35,23 +35,43 @@ fn main() {
 
     //let path = "./test_asm/target/testtraps.s.elf";
     //let mut path: String = "./test_asm/target/testadd.s.elf".to_string();
-    if let Some(p) = env::args().skip(1).next() {
-        path = p
+    let args: Vec<String> = env::args().skip(1).collect();
+    if let Some(p) = args.first() {
+        path = p.clone()
     }
     let (_stream, stream_handle) = OutputStream::try_default().unwrap();
-    let dtb_path = env::args().nth(2);
     let mut image_file = File::open(&path).unwrap();
     let mut contents = vec![];
     image_file.read_to_end(&mut contents).unwrap();
 
     let (bus, audio) = MemoryBus::new();
     stream_handle.play_raw(audio.convert_samples()).unwrap();
-    let mut emu = if contents.starts_with(b"\x7fELF") {
+    //Three paths select a firmware boot: <fw_dynamic.bin> <Image> <dtb>. The firmware starts in
+    //M-mode at the base of RAM, receives the device tree in a1 and a boot info record in a2, and
+    //jumps to the kernel in S-mode.
+    let mut emu = if args.len() >= 3 {
+        let kernel_path = &args[1];
+        let dtb_path = &args[2];
+        assert!(
+            !contents.starts_with(b"\x7fELF"),
+            "the firmware must be a flat binary (fw_jump.bin), not an ELF"
+        );
+        let kernel = std::fs::read(kernel_path).unwrap_or_else(|err| {
+            panic!("could not read the kernel image \"{kernel_path}\": {err}")
+        });
+        let dtb = std::fs::read(dtb_path)
+            .unwrap_or_else(|err| panic!("could not read the device tree \"{dtb_path}\": {err}"));
+        println!("Loading firmware \"{path}\", kernel \"{kernel_path}\", dtb \"{dtb_path}\"");
+        emulator::Emulator::from_firmware(contents, kernel, dtb, MMU::new(bus))
+    } else if contents.starts_with(b"\x7fELF") {
         println!("Loading elf \"{path}\"");
         emulator::Emulator::from_elf(contents, MMU::new(bus))
     } else {
         //A flat kernel Image; the device tree defaults to the one built from rv-emu-rs.dts.
-        let dtb_path = dtb_path.unwrap_or_else(|| "rv-emu-rs.dtb".to_string());
+        let dtb_path = args
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| "rv-emu-rs.dtb".to_string());
         println!("Loading image \"{path}\" with dtb \"{dtb_path}\"");
         let dtb = std::fs::read(&dtb_path)
             .unwrap_or_else(|err| panic!("could not read the device tree \"{dtb_path}\": {err}"));

@@ -1,6 +1,6 @@
 use crate::{mmdevice::MMdevice, traps::TrapType};
 
-pub const RAM_SIZE: usize = 64 * 1024 * 1024;
+pub const RAM_SIZE: usize = 128 * 1024 * 1024;
 
 pub struct RAM {
     data: Box<[u8]>,

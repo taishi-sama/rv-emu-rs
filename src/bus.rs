@@ -63,7 +63,7 @@ impl MemoryBus {
             audio_prod,
         )
     }
-    //TODO: implement PLIC and query it  
+    //TODO: implement PLIC and query it
     pub fn external_interrupt_pending(&self) -> bool {
         false
     }
