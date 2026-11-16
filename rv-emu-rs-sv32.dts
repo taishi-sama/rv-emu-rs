@@ -45,8 +45,8 @@
             status = "okay";
             compatible = "riscv";
             riscv,isa-base = "rv32i";
-            riscv,isa-extensions = "i", "m", "a", "c", "zicsr", "zifencei";
-            riscv,isa = "rv32imac_zicsr_zifencei";
+            riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei";
+            riscv,isa = "rv32imafdc_zicsr_zifencei";
             mmu-type = "riscv,sv32";
 
             cpu_intc: interrupt-controller {

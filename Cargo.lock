@@ -627,6 +627,7 @@ dependencies = [
  "gdbstub_arch",
  "rb",
  "rodio",
+ "softfloat_pure",
 ]
 
 [[package]]
@@ -643,6 +644,14 @@ name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+
+[[package]]
+name = "softfloat_pure"
+version = "0.3.4"
+source = "git+https://github.com/HarryR/softfloat-pure.git?rev=f655f4c3119f6e8b05cf4790df705c6e54520611#f655f4c3119f6e8b05cf4790df705c6e54520611"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "symphonia"

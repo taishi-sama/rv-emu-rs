@@ -183,6 +183,45 @@ pub fn get_compressed_cs_mem_store_32_imm(instruction: u16) -> u32 {
     let off2: u32 = shift_and_trim16!(instruction, 6, 1);
     off6 << 6 | off5_3 << 3 | off2 << 2
 }
+//C.FLD/C.FSD (register form): uimm[5:3] at 12:10, uimm[7:6] at 6:5.
+pub fn get_compressed_c_fld_fsd_offset(instruction: u16) -> u32 {
+    let off5_3: u32 = shift_and_trim16!(instruction, 10, 3);
+    let off7_6: u32 = shift_and_trim16!(instruction, 5, 2);
+    off7_6 << 6 | off5_3 << 3
+}
+//C.FLW/C.FSW (register form): uimm[5:3] at 12:10, uimm[2] at 6, uimm[6] at 5.
+pub fn get_compressed_c_flw_fsw_offset(instruction: u16) -> u32 {
+    let off5_3: u32 = shift_and_trim16!(instruction, 10, 3);
+    let off6: u32 = shift_and_trim16!(instruction, 5, 1);
+    let off2: u32 = shift_and_trim16!(instruction, 6, 1);
+    off6 << 6 | off5_3 << 3 | off2 << 2
+}
+//C.FLDSP: uimm[5] at 12, uimm[4:3] at 6:5, uimm[8:6] at 4:2.
+pub fn get_compressed_c_fldsp_offset(instruction: u16) -> u32 {
+    let off5: u32 = shift_and_trim16!(instruction, 12, 1);
+    let off4_3: u32 = shift_and_trim16!(instruction, 5, 2);
+    let off8_6: u32 = shift_and_trim16!(instruction, 2, 3);
+    off8_6 << 6 | off4_3 << 3 | off5 << 5
+}
+//C.FSDSP: uimm[5:3] at 12:10, uimm[8:6] at 9:7.
+pub fn get_compressed_c_fsdsp_offset(instruction: u16) -> u32 {
+    let off5_3: u32 = shift_and_trim16!(instruction, 10, 3);
+    let off8_6: u32 = shift_and_trim16!(instruction, 7, 3);
+    off8_6 << 6 | off5_3 << 3
+}
+//C.FLWSP: uimm[5] at 12, uimm[4:2] at 6:4, uimm[7:6] at 3:2.
+pub fn get_compressed_c_flwsp_offset(instruction: u16) -> u32 {
+    let off5: u32 = shift_and_trim16!(instruction, 12, 1);
+    let off4_2: u32 = shift_and_trim16!(instruction, 4, 3);
+    let off7_6: u32 = shift_and_trim16!(instruction, 2, 2);
+    off7_6 << 6 | off5 << 5 | off4_2 << 2
+}
+//C.FSWSP: uimm[5:2] at 12:9, uimm[7:6] at 8:7.
+pub fn get_compressed_c_fswsp_offset(instruction: u16) -> u32 {
+    let off5_2: u32 = shift_and_trim16!(instruction, 9, 4);
+    let off7_6: u32 = shift_and_trim16!(instruction, 7, 2);
+    off7_6 << 6 | off5_2 << 2
+}
 pub fn get_compressed_cb_shift_imm(instruction: u16) -> u32 {
     let shamt5: u32 = shift_and_trim16!(instruction, 12, 1);
     let shamt4_0: u32 = shift_and_trim16!(instruction, 2, 5);
@@ -416,8 +455,10 @@ mod tests {
     };
 
     use super::{
-        encode_i_type, get_imm_j_type, parse_format_b, parse_format_i, parse_format_j,
-        parse_format_s,
+        encode_i_type, get_compressed_c_fld_fsd_offset, get_compressed_c_fldsp_offset,
+        get_compressed_c_flw_fsw_offset, get_compressed_c_flwsp_offset,
+        get_compressed_c_fsdsp_offset, get_compressed_c_fswsp_offset, get_imm_j_type,
+        parse_format_b, parse_format_i, parse_format_j, parse_format_s,
     };
     #[test]
     fn super_test_b() {
@@ -554,5 +595,19 @@ mod tests {
         assert_eq!(get_funct3(n), funct3);
         assert_eq!(get_rs1(n), rs1);
         assert_eq!(get_imm_i_type(n), imm as i32 as u32);
+    }
+
+    //Encodings produced by riscv32-elf-as at the maximum offsets, so the high immediate bits
+    //that the small arch tests do not reach are covered.
+    #[test]
+    fn compressed_fp_offsets_decode_high_bits() {
+        assert_eq!(get_compressed_c_fld_fsd_offset(0x3c60), 248); //c.fld f8,248(s0)
+        assert_eq!(get_compressed_c_fld_fsd_offset(0xbc60), 248); //c.fsd f8,248(s0)
+        assert_eq!(get_compressed_c_flw_fsw_offset(0x7c68), 124); //c.flw f10,124(s0)
+        assert_eq!(get_compressed_c_flw_fsw_offset(0xfc68), 124); //c.fsw f10,124(s0)
+        assert_eq!(get_compressed_c_fldsp_offset(0x34fe), 504); //c.fldsp f9,504(sp)
+        assert_eq!(get_compressed_c_fsdsp_offset(0xbfa6), 504); //c.fsdsp f9,504(sp)
+        assert_eq!(get_compressed_c_flwsp_offset(0x75fe), 252); //c.flwsp f11,252(sp)
+        assert_eq!(get_compressed_c_fswsp_offset(0xffae), 252); //c.fswsp f11,252(sp)
     }
 }

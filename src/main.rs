@@ -17,6 +17,8 @@ pub mod cpu;
 pub mod elf_analyzer;
 pub mod emulator;
 pub mod errors;
+#[cfg(feature = "plus_FD")]
+mod fpu;
 pub mod manual_debugger;
 pub mod mmdevice;
 pub mod mmu;
@@ -224,9 +226,12 @@ mod test {
     fn build_arch_tests() {
         static BUILD: OnceLock<Result<(), String>> = OnceLock::new();
         let result = BUILD.get_or_init(|| {
-            let output = Command::new("sh")
-                .arg("build.sh")
-                .current_dir(test_asm_dir())
+            let mut command = Command::new("sh");
+            command.arg("build.sh").current_dir(test_asm_dir());
+            //The FP test sources need an F/D-capable assembler, so skip them when the FPU is
+            //compiled out.
+            command.env("RV_EMU_PLUS_FD", if cfg!(feature = "plus_FD") { "1" } else { "0" });
+            let output = command
                 .output()
                 .map_err(|err| format!("could not run test_asm/build.sh: {err}"))?;
             if output.status.success() {
@@ -445,6 +450,73 @@ mod test {
         test_xori: ("testxori.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10]),
     }
 
+    //F/D tests only run when the FPU is compiled in, but their sources are always registered so
+    //the build and source-consistency checks stay identical for both feature sets.
+    macro_rules! fp_arch_tests {
+        ($($name:ident: ($elf:literal, $expected:expr $(,)?)),* $(,)?) => {
+            const FP_ELVES: &[&str] = &[$($elf),*];
+
+            $(
+                #[cfg(feature = "plus_FD")]
+                #[test]
+                fn $name() {
+                    run_arch_test($elf, $expected);
+                }
+            )*
+        };
+    }
+
+    fp_arch_tests! {
+        test_cfp: (
+            "testcfp.s.elf",
+            &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+                25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40],
+        ),
+        test_fpcsr: ("testfpcsr.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9]),
+        test_fpadd_d: ("testfpadd_d.s.elf", &[2, 3, 4, 5, 6, 7, 8]),
+        test_fpsub_d: ("testfpsub_d.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9]),
+        test_fpmul_d: ("testfpmul_d.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10]),
+        test_fpdiv_d: ("testfpdiv_d.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+        test_fpsqrt_d: ("testfpsqrt_d.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+        test_fpsgnj_d: ("testfpsgnj_d.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
+        test_fpminmax_d: (
+            "testfpminmax_d.s.elf",
+            &[
+                2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38,
+            ],
+        ),
+        test_fpcompare_d: ("testfpcompare_d.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
+        test_fpcvt_d: (
+            "testfpcvt_d.s.elf",
+            &[
+                2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
+            ],
+        ),
+        test_fpclass: ("testfpclass.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]),
+        test_fpfma_d: ("testfpfma_d.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]),
+        test_fpldst_d: ("testfpldst_d.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]),
+        test_fpnan: ("testfpnan.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]),
+        test_fpround: ("testfpround.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]),
+        test_fpexcept: ("testfpexcept.s.elf", &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]),
+        test_fptraps: (
+            "testfptraps.s.elf",
+            &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+                25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
+                46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66,
+                67, 68, 69, 70, 71, 72],
+        ),
+        test_cfpldst: ("testcfpldst.s.elf", &[2, 3, 4, 5, 6, 7]),
+        test_cfptraps: (
+            "testcfptraps.s.elf",
+            &[
+                2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28, 29, 30, 31,
+            ],
+        ),
+    }
+
     #[test]
     fn every_test_asm_source_is_registered() {
         for entry in std::fs::read_dir(test_asm_dir().join("tests")).unwrap() {
@@ -454,7 +526,7 @@ mod test {
             }
             let elf = format!("{file_name}.elf");
             assert!(
-                REGISTERED_ELVES.contains(&elf.as_str()),
+                REGISTERED_ELVES.contains(&elf.as_str()) || FP_ELVES.contains(&elf.as_str()),
                 "{file_name} has no arch test registered"
             );
         }
@@ -462,7 +534,7 @@ mod test {
 
     #[test]
     fn every_registered_arch_test_has_a_source() {
-        for elf in REGISTERED_ELVES {
+        for elf in REGISTERED_ELVES.iter().chain(FP_ELVES) {
             let source = elf.trim_end_matches(".elf");
             assert!(
                 test_asm_dir().join("tests").join(source).is_file(),

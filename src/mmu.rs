@@ -1,6 +1,6 @@
 use crate::{
     bus::{AtomicAccess, MemoryBus},
-    cpu::{MSTATUS_MXR, MSTATUS_SUM, PrivilegeMode},
+    cpu::{PrivilegeMode, MSTATUS_MXR, MSTATUS_SUM},
     traps::{Trap, TrapType},
 };
 
@@ -85,7 +85,7 @@ impl MMU {
             current_asid_tag: ASID_VALIDITY_MARKER,
         }
     }
-    //satp, 
+    //satp,
     pub fn satp(&self) -> u32 {
         self.satp
     }
@@ -333,6 +333,31 @@ impl MMU {
         }
         Ok(value)
     }
+    //A 64-bit access is either two adjacent words within one page or a byte-wise sequence
+    //across a page boundary. Translating every byte before the first bus access keeps a fault
+    //from leaving a partially written store behind.
+    pub fn read_dword(&mut self, address: u32) -> Result<u64, Trap> {
+        if !self.translation_enabled() {
+            return self.bus.read_dword(address);
+        }
+        if address & PAGE_MASK <= PAGE_SIZE - 8 {
+            let pa = self.translate(address, AccessType::Load)?;
+            return self
+                .bus
+                .read_dword(pa)
+                .map_err(|trap| Self::bus_error(address, trap.tcause));
+        }
+        let mut value = 0u64;
+        for i in 0..8 {
+            let pa = self.translate(address.wrapping_add(i), AccessType::Load)?;
+            let byte = self
+                .bus
+                .read_byte(pa)
+                .map_err(|trap| Self::bus_error(address.wrapping_add(i), trap.tcause))?;
+            value |= (byte as u64) << (i * 8);
+        }
+        Ok(value)
+    }
     pub fn read_halfword(&mut self, address: u32) -> Result<u16, Trap> {
         if !self.translation_enabled() {
             return self.bus.read_halfword(address);
@@ -381,6 +406,30 @@ impl MMU {
         for (i, pa) in physical.iter().enumerate() {
             self.bus
                 .write_byte(*pa, (word >> (i * 8)) as u8)
+                .map_err(|trap| Self::bus_error(address.wrapping_add(i as u32), trap.tcause))?;
+        }
+        Ok(())
+    }
+    pub fn write_dword(&mut self, address: u32, value: u64) -> Result<(), Trap> {
+        if !self.translation_enabled() {
+            return self.bus.write_dword(address, value);
+        }
+        if address & PAGE_MASK <= PAGE_SIZE - 8 {
+            let pa = self.translate(address, AccessType::Store)?;
+            return self
+                .bus
+                .write_dword(pa, value)
+                .map_err(|trap| Self::bus_error(address, trap.tcause));
+        }
+        //Translate every byte before writing anything, so a page fault cannot leave a partial
+        //store behind.
+        let mut physical = [0u32; 8];
+        for (i, pa) in physical.iter_mut().enumerate() {
+            *pa = self.translate(address.wrapping_add(i as u32), AccessType::Store)?;
+        }
+        for (i, pa) in physical.iter().enumerate() {
+            self.bus
+                .write_byte(*pa, (value >> (i * 8)) as u8)
                 .map_err(|trap| Self::bus_error(address.wrapping_add(i as u32), trap.tcause))?;
         }
         Ok(())

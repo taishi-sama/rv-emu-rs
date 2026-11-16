@@ -1,5 +1,7 @@
 use std::sync::{atomic::AtomicBool, Arc};
 
+#[cfg(feature = "plus_FD")]
+use crate::fpu::FpuState;
 use crate::{
     bus::{AtomicAccess, RAM_ADDRESS},
     errors::EmulatorError,
@@ -46,13 +48,20 @@ const MSTATUS_SPIE: u32 = 1 << 5;
 const MSTATUS_MPIE: u32 = 1 << 7;
 const MSTATUS_SPP: u32 = 1 << 8;
 const MSTATUS_MPP_SHIFT: u32 = 11;
+pub(crate) const MSTATUS_FS: u32 = 0b11 << 13;
 const MSTATUS_MPRV: u32 = 1 << 17;
 pub(crate) const MSTATUS_SUM: u32 = 1 << 18;
 pub(crate) const MSTATUS_MXR: u32 = 1 << 19;
 const MSTATUS_TVM: u32 = 1 << 20;
 const MSTATUS_TW: u32 = 1 << 21;
 const MSTATUS_TSR: u32 = 1 << 22;
-const SSTATUS_MASK: u32 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM | MSTATUS_MXR;
+const MSTATUS_SD: u32 = 1 << 31;
+#[cfg(feature = "plus_FD")]
+const SSTATUS_FS_BITS: u32 = MSTATUS_FS;
+#[cfg(not(feature = "plus_FD"))]
+const SSTATUS_FS_BITS: u32 = 0;
+const SSTATUS_MASK: u32 =
+    MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_SUM | MSTATUS_MXR | SSTATUS_FS_BITS;
 const MSTATUS_MASK: u32 = MSTATUS_MIE
     | MSTATUS_MPIE
     | (0b11 << MSTATUS_MPP_SHIFT)
@@ -84,8 +93,13 @@ const INTERRUPT_PRIORITY: [(u32, TrapType); 6] = [
     (INTERRUPT_STI, TrapType::SupervisorTimerInterrupt),
 ];
 
-//misa: MXL=32-bit, I/M/A/C/S/U.
-const MISA: u32 = 0x4014_1105;
+//misa: MXL=32-bit, I/M/A/C/S/U plus F/D when the FPU is built in.
+const MISA_BASE: u32 = 0x4014_1105;
+#[cfg(feature = "plus_FD")]
+const MISA_FP: u32 = (1 << 5) | (1 << 3);
+#[cfg(not(feature = "plus_FD"))]
+const MISA_FP: u32 = 0;
+const MISA: u32 = MISA_BASE | MISA_FP;
 //Exceptions 0-9, 12, 13 and 15 can be delegated; medeleg[11] is read-only zero.
 const MEDELEG_MASK: u32 = 0xb3ff;
 const MIDELEG_MASK: u32 = SUPERVISOR_INTERRUPT_MASK;
@@ -125,6 +139,9 @@ pub struct CPUState {
     pub pmpcfg: [u32; 4],
     pub pmpaddr: [u32; 16],
     pub privilege: PrivilegeMode,
+    //F/D register file and fcsr. Only present when the FPU is enabled at build time.
+    #[cfg(feature = "plus_FD")]
+    pub fpu: FpuState,
     pub wfi: bool,
     //Set when the last check saw a pending interrupt targeting that privilege. `step` rechecks
     //them after each instruction so enabling a global interrupt bit inside a device-update batch
@@ -336,6 +353,10 @@ impl CPU {
                         tval: instr,
                     }),
                 },
+                #[cfg(feature = "plus_FD")]
+                0b0000111 => self.execute_fp_load(instr), //FLW/FLD
+                #[cfg(feature = "plus_FD")]
+                0b0100111 => self.execute_fp_store(instr), //FSW/FSD
                 0b0010011 => match get_funct3(instr) {
                     0b000 => Self::addi(&mut self.state, instr),
                     0b010 => Self::slti(&mut self.state, instr),
@@ -476,6 +497,10 @@ impl CPU {
                         tval: instr,
                     }),
                 },
+                #[cfg(feature = "plus_FD")]
+                0b1010011 => self.execute_fp(instr), //OP-FP
+                #[cfg(feature = "plus_FD")]
+                0b1000011 | 0b1000111 | 0b1001011 | 0b1001111 => self.execute_fma(instr), //FMA
                 0b0101111 => match get_funct3(instr) {
                     0b010 => match get_rs3(instr) {
                         0b00010 => Self::lr_w(&mut self.state, &mut self.mmu, instr),
@@ -522,7 +547,9 @@ impl CPU {
                 },
                 0b010 => Self::c_lw(&mut self.state, &mut self.mmu, compressed),
                 0b110 => Self::c_sw(&mut self.state, &mut self.mmu, compressed),
-                //0b001/0b011/0b101/0b111 are the F/D load and store forms, 0b100 is reserved
+                #[cfg(feature = "plus_FD")]
+                0b001 | 0b011 | 0b101 | 0b111 => self.execute_compressed_fp(compressed),
+                //0b100 is reserved
                 _ => Err(illegal_instruction(instr)),
             },
             //Quadrant 1
@@ -606,7 +633,8 @@ impl CPU {
                     }
                 }
                 0b110 => Self::c_swsp(&mut self.state, &mut self.mmu, compressed),
-                //0b001/0b011/0b101/0b111 are the F/D forms
+                #[cfg(feature = "plus_FD")]
+                0b001 | 0b011 | 0b101 | 0b111 => self.execute_compressed_fp(compressed),
                 _ => Err(illegal_instruction(instr)),
             },
             //0b11 is a 32 bit instruction and never reaches this point
@@ -989,6 +1017,49 @@ impl CPU {
         let required = ((csr >> 8) & 0b11) as u8;
         required != 0b10 && required <= state.privilege.level()
     }
+    //mstatus.SD summarizes whether the floating-point state is dirty. It is computed on reads
+    //instead of being stored, so it can never go stale.
+    fn sd_bit(mstatus: u32) -> u32 {
+        if mstatus & MSTATUS_FS == MSTATUS_FS {
+            MSTATUS_SD
+        } else {
+            0
+        }
+    }
+    //Floating-point CSRs are part of the FP state. Per the privileged spec, accessing them while
+    //FS=Off traps, and writing them moves FS to Dirty.
+    #[cfg(feature = "plus_FD")]
+    fn fp_csr_read(&self, csr: u16) -> Result<u32, Trap> {
+        if self.state.mstatus as u32 & MSTATUS_FS == 0 {
+            return Err(Trap {
+                tcause: TrapType::IllegalInstruction,
+                tval: 0,
+            });
+        }
+        Ok(match csr {
+            0x001 => self.state.fpu.fcsr() & 0x1f,
+            0x002 => self.state.fpu.frm() as u32,
+            0x003 => self.state.fpu.fcsr(),
+            _ => unreachable!(),
+        })
+    }
+    #[cfg(feature = "plus_FD")]
+    fn fp_csr_write(&mut self, csr: u16, value: u32) -> Result<(), Trap> {
+        if self.state.mstatus as u32 & MSTATUS_FS == 0 {
+            return Err(Trap {
+                tcause: TrapType::IllegalInstruction,
+                tval: 0,
+            });
+        }
+        match csr {
+            0x001 => self.state.fpu.set_fflags(value),
+            0x002 => self.state.fpu.set_frm(value),
+            0x003 => self.state.fpu.set_fcsr(value),
+            _ => unreachable!(),
+        }
+        self.mark_fp_dirty();
+        Ok(())
+    }
     //Counters are readable from S/U only when the corresponding enable bits are set.
     fn counter_access_allowed(state: &CPUState, bit: u32) -> bool {
         match state.privilege {
@@ -1025,7 +1096,12 @@ impl CPU {
             });
         }
         Ok(match csr {
-            0x100 => self.state.mstatus as u32 & SSTATUS_MASK, //sstatus
+            #[cfg(feature = "plus_FD")]
+            0x001..=0x003 => self.fp_csr_read(csr)?,
+            0x100 => {
+                let status = self.state.mstatus as u32 & SSTATUS_MASK;
+                status | Self::sd_bit(status)
+            } //sstatus
             0x104 => self.state.mie & SUPERVISOR_INTERRUPT_MASK & self.state.mideleg, //sie
             0x105 => self.state.stvec,
             0x106 => self.state.scounteren,
@@ -1040,8 +1116,11 @@ impl CPU {
                     & self.state.mideleg
             } //sip
             0x180 => self.mmu.satp(),
-            0x300 => self.state.mstatus as u32, //mstatus
-            0x301 => MISA,                      //misa
+            0x300 => {
+                let status = self.state.mstatus as u32;
+                status | Self::sd_bit(status)
+            } //mstatus
+            0x301 => MISA, //misa
             0x302 => self.state.medeleg,
             0x303 => self.state.mideleg,
             0x304 => self.state.mie,
@@ -1088,6 +1167,8 @@ impl CPU {
             });
         }
         match csr {
+            #[cfg(feature = "plus_FD")]
+            0x001..=0x003 => self.fp_csr_write(csr, new_val)?,
             0x100 => {
                 let sstatus =
                     (self.state.mstatus as u32 & !SSTATUS_MASK) | (new_val & SSTATUS_MASK);
@@ -1813,6 +1894,8 @@ impl CPUState {
             pmpcfg: [0; 4],
             pmpaddr: [0; 16],
             privilege: PrivilegeMode::Machine,
+            #[cfg(feature = "plus_FD")]
+            fpu: FpuState::default(),
             wfi: false,
             machine_interrupt_pending: false,
             supervisor_interrupt_pending: false,
@@ -1835,7 +1918,7 @@ impl CPUState {
         }
     }
     #[inline(always)]
-    fn get_x(&self, x: u8) -> u32 {
+    pub(crate) fn get_x(&self, x: u8) -> u32 {
         self.x[x as usize]
     }
     //Route a trap to M or S. Traps never move from a more privileged mode to a less privileged

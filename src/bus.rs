@@ -39,6 +39,11 @@ fn with_address<T>(result: Result<T, TrapType>, address: u32) -> Result<T, Trap>
     })
 }
 
+//A word access needs four bytes inside a single memory-mapped region.
+fn word_in_region(address: u32, start: u32, end: u32) -> bool {
+    address >= start && address < end && end - address >= 4
+}
+
 //The physical address space: RAM, the CLINT and the memory mapped devices. Everything here takes
 //physical addresses; translating them from the addresses issued by the CPU is the MMU's job.
 pub struct MemoryBus {
@@ -198,6 +203,46 @@ impl MemoryBus {
             _ => Err(TrapType::StoreAccessFault),
         };
         with_address(result, address)
+    }
+    //64-bit accesses are used by FLD/FSD. They are decomposed into two word accesses, but both
+    //words are range-checked first so a bad second word cannot leave a partial store behind.
+    pub fn read_dword(&mut self, address: u32) -> Result<u64, Trap> {
+        let low = self.read_word(address)?;
+        let high = self.read_word(address.wrapping_add(4))?;
+        Ok(low as u64 | ((high as u64) << 32))
+    }
+    pub fn check_write_dword(&self, address: u32) -> Result<(), Trap> {
+        let regions = [
+            (RAM_ADDRESS, RAM_END),
+            (UART_ADDRESS, UART_END),
+            (PRIMITIVE_AUDIO_ADDRESS, AUDIO_END),
+            (CLINT_ADDRESS, CLINT_END),
+            (SYSCON_ADDRESS, SYSCON_END),
+        ];
+        let writable = |addr: u32| {
+            regions
+                .iter()
+                .any(|&(start, end)| word_in_region(addr, start, end))
+        };
+        if !writable(address) {
+            return Err(Trap {
+                tcause: TrapType::StoreAccessFault,
+                tval: address,
+            });
+        }
+        let high = address.wrapping_add(4);
+        if !writable(high) {
+            return Err(Trap {
+                tcause: TrapType::StoreAccessFault,
+                tval: high,
+            });
+        }
+        Ok(())
+    }
+    pub fn write_dword(&mut self, address: u32, value: u64) -> Result<(), Trap> {
+        self.check_write_dword(address)?;
+        self.write_word(address, value as u32)?;
+        self.write_word(address.wrapping_add(4), (value >> 32) as u32)
     }
     pub fn write_halfword(&mut self, address: u32, halfword: u16) -> Result<(), Trap> {
         let result = match address {

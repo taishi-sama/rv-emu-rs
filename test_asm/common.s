@@ -32,6 +32,42 @@ stop_by_fault:
     .option pop
 .endm
 
+#Double-precision results are compared through their two stored words.
+.macro test_d_case test_num_low, test_num_high, freg, low, high
+    addi sp, sp, -8
+    fsd \freg, 0(sp)
+    lw a3, 0(sp)
+    lw a4, 4(sp)
+    addi sp, sp, 8
+    li_expected t6, \low
+    beq a3, t6, 1f
+    fail \test_num_low
+    j 2f
+1:  pass \test_num_low
+2:
+    li_expected t6, \high
+    beq a4, t6, 3f
+    fail \test_num_high
+    j 4f
+3:  pass \test_num_high
+4:
+.endm
+
+.macro load_d freg, low, high
+    addi sp, sp, -8
+    li t1, \low
+    sw t1, 0(sp)
+    li t1, \high
+    sw t1, 4(sp)
+    fld \freg, 0(sp)
+    addi sp, sp, 8
+.endm
+
+.macro load_s freg, bits
+    li t1, \bits
+    fmv.w.x \freg, t1
+.endm
+
 .macro test_insert_nops amount
 .if \amount
     nop

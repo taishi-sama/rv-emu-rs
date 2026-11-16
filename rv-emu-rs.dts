@@ -42,8 +42,10 @@
 			reg = <0x00>;
 			status = "okay";
 			compatible = "riscv";
-			/* misa reads as 0x50001105 */
-			riscv,isa = "rv32imac";
+			/* misa reads as 0x4014112d */
+			riscv,isa-base = "rv32i";
+			riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei";
+			riscv,isa = "rv32imafdc_zicsr_zifencei";
 			mmu-type = "riscv,none";
 
 			cpu_intc: interrupt-controller {
