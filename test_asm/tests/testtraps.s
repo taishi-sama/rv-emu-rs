@@ -29,6 +29,8 @@ __start:
     TEST_CASE 6, t0, 0
 
     li s0, 0
+    li t0, 0x1800
+    csrs mstatus, t0
     la t0, 4f
     csrw mepc, t0
     mret

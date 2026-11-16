@@ -19,7 +19,7 @@ use crate::{
     traps::{Trap, TrapType},
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PrivilegeMode {
     //Discriminants match the mstatus.MPP encoding.
     Machine = 3,
@@ -28,21 +28,69 @@ pub enum PrivilegeMode {
     User = 0,
 }
 
-const MSTATUS_MIE: u32 = 1 << 3;
-const MSTATUS_MPIE: u32 = 1 << 7;
-const MSTATUS_MPP_SHIFT: u32 = 11;
+impl PrivilegeMode {
+    //Rank used for privilege checks, matching the CSR address encoding. Reserved cannot be
+    //entered through a legal trap or xRET, so it is treated as machine level.
+    fn level(self) -> u8 {
+        match self {
+            PrivilegeMode::User => 0,
+            PrivilegeMode::Supervisor => 1,
+            PrivilegeMode::Machine | PrivilegeMode::Reserved => 3,
+        }
+    }
+}
 
-//Machine interrupt bits, shared by mie and mip. Priority is platform-defined; like most
-//implementations this takes external before software before timer.
+const MSTATUS_SIE: u32 = 1 << 1;
+const MSTATUS_MIE: u32 = 1 << 3;
+const MSTATUS_SPIE: u32 = 1 << 5;
+const MSTATUS_MPIE: u32 = 1 << 7;
+const MSTATUS_SPP: u32 = 1 << 8;
+const MSTATUS_MPP_SHIFT: u32 = 11;
+const MSTATUS_MPRV: u32 = 1 << 17;
+const MSTATUS_MXR: u32 = 1 << 19;
+const MSTATUS_TVM: u32 = 1 << 20;
+const MSTATUS_TW: u32 = 1 << 21;
+const MSTATUS_TSR: u32 = 1 << 22;
+//SUM is read-only zero while satp.MODE is read-only zero; Sv32 will make it writable.
+const SSTATUS_MASK: u32 = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_MXR;
+const MSTATUS_MASK: u32 = MSTATUS_MIE
+    | MSTATUS_MPIE
+    | (0b11 << MSTATUS_MPP_SHIFT)
+    | MSTATUS_MPRV
+    | MSTATUS_TVM
+    | MSTATUS_TW
+    | MSTATUS_TSR
+    | SSTATUS_MASK;
+
+//Interrupt bits, shared by mie and mip. Only supervisor interrupts are delegatable here:
+//mideleg bits for machine interrupts are hardwired to zero, a choice the spec permits.
+const INTERRUPT_SSI: u32 = 1 << 1;
 const INTERRUPT_MSI: u32 = 1 << 3;
+const INTERRUPT_STI: u32 = 1 << 5;
 const INTERRUPT_MTI: u32 = 1 << 7;
+const INTERRUPT_SEI: u32 = 1 << 9;
 const INTERRUPT_MEI: u32 = 1 << 11;
 const MACHINE_INTERRUPT_MASK: u32 = INTERRUPT_MSI | INTERRUPT_MTI | INTERRUPT_MEI;
-const MACHINE_INTERRUPTS: [(u32, TrapType); 3] = [
+const SUPERVISOR_INTERRUPT_MASK: u32 = INTERRUPT_SSI | INTERRUPT_STI | INTERRUPT_SEI;
+const IMPLEMENTED_INTERRUPT_MASK: u32 = MACHINE_INTERRUPT_MASK | SUPERVISOR_INTERRUPT_MASK;
+//Decreasing priority per the privileged spec: external, software, timer for each target,
+//with machine-level interrupts ahead of supervisor-level ones.
+const INTERRUPT_PRIORITY: [(u32, TrapType); 6] = [
     (INTERRUPT_MEI, TrapType::MachineExternalInterrupt),
     (INTERRUPT_MSI, TrapType::MachineSoftwareInterrupt),
     (INTERRUPT_MTI, TrapType::MachineTimerInterrupt),
+    (INTERRUPT_SEI, TrapType::SupervisorExternalInterrupt),
+    (INTERRUPT_SSI, TrapType::SupervisorSoftwareInterrupt),
+    (INTERRUPT_STI, TrapType::SupervisorTimerInterrupt),
 ];
+
+//misa: MXL=32-bit, I/M/A/C/S/U.
+const MISA: u32 = 0x4014_1105;
+//Exceptions 0-9, 12, 13 and 15 can be delegated; medeleg[11] is read-only zero.
+const MEDELEG_MASK: u32 = 0xb3ff;
+const MIDELEG_MASK: u32 = SUPERVISOR_INTERRUPT_MASK;
+const COUNTEREN_CY: u32 = 1 << 0;
+const COUNTEREN_TM: u32 = 1 << 1;
 
 // RV32IMAC
 // Everything that is not memory-related
@@ -63,15 +111,30 @@ pub struct CPUState {
     pub mepc: u32,
     pub mtval: u32,
     pub mcause: u32,
+    //Supervisor CSRs. sstatus, sie and sip are views of mstatus, mie and mip.
+    pub stvec: u32,
+    pub sepc: u32,
+    pub scause: u32,
+    pub stval: u32,
+    pub sscratch: u32,
+    pub satp: u32,
+    pub medeleg: u32,
+    pub mideleg: u32,
+    pub mcounteren: u32,
+    pub scounteren: u32,
     //PMP configuration and address registers. The values are stored but not enforced yet.
     pub pmpcfg: [u32; 4],
     pub pmpaddr: [u32; 16],
     pub privilege: PrivilegeMode,
     pub wfi: bool,
-    //Set when the last check saw an enabled interrupt this CPU can deliver. `step` checks it
-    //after each instruction so enabling mstatus.MIE inside a device-update batch still takes
-    //the trap.
-    pub interrupt_pending: bool,
+    //Set when the last check saw a pending interrupt targeting that privilege. `step` rechecks
+    //them after each instruction so enabling a global interrupt bit inside a device-update batch
+    //still takes the trap.
+    pub machine_interrupt_pending: bool,
+    pub supervisor_interrupt_pending: bool,
+    //Set by writes to CSRs the interrupt trap conditions depend on, so they are re-evaluated
+    //on the next instruction instead of at the next device poll.
+    pub resample_interrupts: bool,
     //Address of the word reserved by LR.W, accepted by SC.W afterwards.
     pub reservation_slot: Option<u32>,
     pub stopflag: Option<Arc<AtomicBool>>,
@@ -101,17 +164,17 @@ impl CPU {
     }
     pub fn step(&mut self) -> Result<u32, EmulatorError> {
         //Waking from WFI and taking the boundary-polled interrupt happen in handle_interrupt;
-        //step re-checks the latch after each instruction so an interrupt seen by the last poll
-        //is taken as soon as mstatus.MIE becomes set. A halted hart simply retires nothing.
+        //step re-checks the latch after each instruction so an interrupt seen by the last poll is
+        //taken as soon as the guest enables it. A halted hart simply retires nothing.
         if self.state.wfi {
             return Ok(0);
         }
         let res = self.execute_instruction();
         match res {
             Ok(v) => {
-                //A pending interrupt must be taken as soon as MIE becomes set, not only at the
-                //next host poll; the guest can enable and disable MIE inside one batch.
-                if self.state.interrupt_pending && self.state.mstatus as u32 & MSTATUS_MIE != 0 {
+                //An interrupt must be taken as soon as it becomes enabled, not only at the next
+                //host poll; the guest can toggle the global enable inside one batch.
+                if self.interrupt_ready() {
                     self.handle_interrupt()?;
                 }
                 return Ok(v);
@@ -122,26 +185,76 @@ impl CPU {
             }
         }
     }
-    //Sample the machine interrupt sources, wake WFI, and take the highest-priority enabled
-    //interrupt. External-controller interrupts plug in through MMU::meip; S-mode delegation
-    //will extend the delivery target here.
+    //Cheap recheck used inside a device-update batch: is an interrupt that was pending at the
+    //last poll now enabled for the current privilege?
+    fn interrupt_ready(&self) -> bool {
+        //A CSR write can change the trap conditions; re-evaluate immediately.
+        if self.state.resample_interrupts {
+            return true;
+        }
+        let mstatus = self.state.mstatus as u32;
+        if self.state.machine_interrupt_pending
+            && match self.state.privilege {
+                PrivilegeMode::Machine => mstatus & MSTATUS_MIE != 0,
+                _ => true,
+            }
+        {
+            return true;
+        }
+        if self.state.supervisor_interrupt_pending {
+            match self.state.privilege {
+                PrivilegeMode::User => return true,
+                PrivilegeMode::Supervisor => return mstatus & MSTATUS_SIE != 0,
+                _ => {}
+            }
+        }
+        false
+    }
+    //Sample the interrupt sources, split them by delegation, wake WFI, and take the
+    //highest-priority interrupt that is enabled for the current privilege. External-controller
+    //interrupts plug in through MMU::meip.
     pub fn handle_interrupt(&mut self) -> Result<(), EmulatorError> {
+        self.state.resample_interrupts = false;
         let pending = Self::pending_mip(&self.state, &mut self.mmu);
-        let deliverable = self.state.mie & pending & MACHINE_INTERRUPT_MASK;
-        self.state.interrupt_pending = deliverable != 0;
-        //WFI wakes on any locally enabled interrupt, even when mstatus.MIE is clear.
-        if self.state.wfi && self.state.mie & pending != 0 {
+        let machine = self.state.mie & pending & IMPLEMENTED_INTERRUPT_MASK & !self.state.mideleg;
+        let supervisor = self.state.mie & pending & IMPLEMENTED_INTERRUPT_MASK & self.state.mideleg;
+        self.state.machine_interrupt_pending = machine != 0;
+        self.state.supervisor_interrupt_pending = supervisor != 0;
+        //WFI resumes for any locally enabled interrupt, independent of the global enables and
+        //of delegation.
+        if self.state.wfi && self.state.mie & pending & IMPLEMENTED_INTERRUPT_MASK != 0 {
             self.state.wfi = false;
         }
-        if deliverable == 0 || self.state.mstatus as u32 & MSTATUS_MIE == 0 {
-            return Ok(());
+        let mstatus = self.state.mstatus as u32;
+        //Interrupts for a higher privilege are always enabled; for the current privilege they
+        //need the corresponding global enable.
+        let machine_enabled = match self.state.privilege {
+            PrivilegeMode::Machine => mstatus & MSTATUS_MIE != 0,
+            _ => true,
+        };
+        let supervisor_enabled = match self.state.privilege {
+            PrivilegeMode::Machine | PrivilegeMode::Reserved => false,
+            PrivilegeMode::Supervisor => mstatus & MSTATUS_SIE != 0,
+            PrivilegeMode::User => true,
+        };
+        if machine_enabled {
+            for (bit, cause) in INTERRUPT_PRIORITY {
+                if machine & bit != 0 {
+                    return self.state.process_trap(Trap {
+                        tcause: cause,
+                        tval: 0,
+                    });
+                }
+            }
         }
-        for (bit, cause) in MACHINE_INTERRUPTS {
-            if deliverable & bit != 0 {
-                return self.state.process_trap(Trap {
-                    tcause: cause,
-                    tval: 0,
-                });
+        if supervisor_enabled {
+            for (bit, cause) in INTERRUPT_PRIORITY {
+                if supervisor & bit != 0 {
+                    return self.state.process_trap(Trap {
+                        tcause: cause,
+                        tval: 0,
+                    });
+                }
             }
         }
         Ok(())
@@ -312,7 +425,11 @@ impl CPU {
                         1 => Self::ebreak(&mut self.state, instr),
 
                         a @ _ => {
-                            if get_rs1(instr) == 0 && get_rd(instr) == 0 {
+                            //SFENCE.VMA takes rs1/rs2 operands and requires rd=0. All four
+                            //operand combinations are valid, and over-fencing is always legal.
+                            if get_rd(instr) == 0 && get_funct7(instr) == 0b0001001 {
+                                Self::sfence_vma(&mut self.state, instr)
+                            } else if get_rs1(instr) == 0 && get_rd(instr) == 0 {
                                 match a {
                                     0b000100000010 => Self::sret(&mut self.state, instr),
                                     0b001100000010 => Self::mret(&mut self.state, instr),
@@ -848,101 +965,269 @@ impl CPU {
         }
         mip
     }
+    //csr[9:8] is the lowest privilege that may access the register. There is no H extension, so
+    //H-level addresses are treated as non-existent.
+    fn csr_privilege_ok(state: &CPUState, csr: u16) -> bool {
+        let required = ((csr >> 8) & 0b11) as u8;
+        required != 0b10 && required <= state.privilege.level()
+    }
+    //Counters are readable from S/U only when the corresponding enable bits are set.
+    fn counter_access_allowed(state: &CPUState, bit: u32) -> bool {
+        match state.privilege {
+            PrivilegeMode::Machine | PrivilegeMode::Reserved => true,
+            PrivilegeMode::Supervisor => state.mcounteren & bit != 0,
+            PrivilegeMode::User => state.mcounteren & bit != 0 && state.scounteren & bit != 0,
+        }
+    }
     fn get_csr(state: &CPUState, mmu: &mut MMU, csr: u16) -> Result<u32, Trap> {
-        //TODO: privileges check
+        if !Self::csr_privilege_ok(state, csr) {
+            return Err(Trap {
+                tcause: TrapType::IllegalInstruction,
+                tval: 0,
+            });
+        }
+        let counter_bit = match csr {
+            0xC00 | 0xC80 => COUNTEREN_CY,
+            0xC01 | 0xC81 => COUNTEREN_TM,
+            _ => 0,
+        };
+        if counter_bit != 0 && !Self::counter_access_allowed(state, counter_bit) {
+            return Err(Trap {
+                tcause: TrapType::IllegalInstruction,
+                tval: 0,
+            });
+        }
+        if csr == 0x180
+            && state.privilege == PrivilegeMode::Supervisor
+            && state.mstatus as u32 & MSTATUS_TVM != 0
+        {
+            return Err(Trap {
+                tcause: TrapType::IllegalInstruction,
+                tval: 0,
+            });
+        }
         Ok(match csr {
-            0x340 => state.mscratch,
-            0x305 => state.mtvec,
+            0x100 => state.mstatus as u32 & SSTATUS_MASK, //sstatus
+            0x104 => state.mie & SUPERVISOR_INTERRUPT_MASK & state.mideleg, //sie
+            0x105 => state.stvec,
+            0x106 => state.scounteren,
+            0x10A => 0, //senvcfg; all fields are read-only zero here
+            0x140 => state.sscratch,
+            0x141 => state.sepc,
+            0x142 => state.scause,
+            0x143 => state.stval,
+            0x144 => Self::pending_mip(state, mmu) & SUPERVISOR_INTERRUPT_MASK & state.mideleg, //sip
+            0x180 => state.satp,
+            0x300 => state.mstatus as u32, //mstatus
+            0x301 => MISA,                 //misa
+            0x302 => state.medeleg,
+            0x303 => state.mideleg,
             0x304 => state.mie,
-
-            0x344 => Self::pending_mip(state, mmu),
+            0x305 => state.mtvec,
+            0x306 => state.mcounteren,
+            0x30A => 0, //menvcfg; all fields are read-only zero here
+            0x310 => 0, //mstatush; little-endian only, MBE and SBE are read-only zero
+            0x31A => 0, //menvcfgh
+            0x340 => state.mscratch,
             0x341 => state.mepc,
             0x342 => state.mcause,
             0x343 => state.mtval,
+            0x344 => Self::pending_mip(state, mmu), //mip
             0x3a0..=0x3a3 => state.pmpcfg[(csr - 0x3a0) as usize],
             0x3b0..=0x3bf => state.pmpaddr[(csr - 0x3b0) as usize],
-            0xf11 => 0xff0ff0ff,                              //vendorId
-            0xf12 => 0x0,                                     //marchid
-            0xf13 => 0x0,                                     //mimpid
-            0xf14 => 0x0,                                     //mhartid
-            0xf15 => 0x0,                                     //mconfigptr
-            0x301 => 0b01_0_10000_00000000_00010001_00000101, //misa, XLEN=32, IMAC
-
-            0x300 => state.mstatus as u32,         //mstatus
-            0x310 => (state.mstatus >> 32) as u32, //mstatus
-
             0xC00 => state.cycle as u32,
-            0xC80 => (state.cycle >> 32) as u32,
-
             0xC01 => mmu.mtime() as u32,         //time
+            0xC80 => (state.cycle >> 32) as u32, //cycleh
             0xC81 => (mmu.mtime() >> 32) as u32, //timeh
-            _ => todo!("CSR {csr:0x} not implemented"),
+            0xf11 => 0xff0ff0ff,                 //vendorId
+            0xf12..=0xf15 => 0,                  //marchid, mimpid, mhartid, mconfigptr
+            _ => {
+                return Err(Trap {
+                    tcause: TrapType::IllegalInstruction,
+                    tval: 0,
+                });
+            }
         })
     }
-    //Is register writable
-    fn set_csr(state: &mut CPUState, csr: u16, new_val: u32) -> Result<bool, Trap> {
-        //TODO: privileges check
+    fn set_csr(state: &mut CPUState, csr: u16, new_val: u32) -> Result<(), Trap> {
+        if !Self::csr_privilege_ok(state, csr) || (csr >> 10) & 0b11 == 0b11 {
+            return Err(Trap {
+                tcause: TrapType::IllegalInstruction,
+                tval: 0,
+            });
+        }
+        if csr == 0x180
+            && state.privilege == PrivilegeMode::Supervisor
+            && state.mstatus as u32 & MSTATUS_TVM != 0
+        {
+            return Err(Trap {
+                tcause: TrapType::IllegalInstruction,
+                tval: 0,
+            });
+        }
         match csr {
-            0x340 => state.mscratch = new_val,
-            0x305 => state.mtvec = new_val & !0b11, //Only direct mode is implemented
-            //Only the implemented machine interrupt bits exist; S-mode bits arrive with S-mode.
-            0x304 => state.mie = new_val & MACHINE_INTERRUPT_MASK,
-            0xC00 => {
-                return Ok(false);
-            } //cyclel
-            0xC80 => {
-                return Ok(false);
-            } //cycleh
-            //MSIP, MTIP and MEIP are device-driven and read-only from the CSR side.
-            0x344 => state.mip = new_val & !MACHINE_INTERRUPT_MASK,
-            0x341 => state.mepc = new_val,
-            0x3a0..=0x3a3 => state.pmpcfg[(csr - 0x3a0) as usize] = new_val,
-            0x3b0..=0x3bf => state.pmpaddr[(csr - 0x3b0) as usize] = new_val,
-            0x300 => {
-                state.mstatus &= !(u32::MAX as u64);
-                state.mstatus |= new_val as u64
-            } //mstatus
-            0x310 => {
-                state.mstatus &= u32::MAX as u64;
-                state.mstatus |= (new_val as u64) << 32
+            0x100 => {
+                let sstatus = (state.mstatus as u32 & !SSTATUS_MASK) | (new_val & SSTATUS_MASK);
+                state.mstatus = (state.mstatus & 0xffff_ffff_0000_0000) | sstatus as u64;
+                state.resample_interrupts = true
+            } //sstatus
+            0x104 => {
+                //Bits not delegated by mideleg are read-only zero in sie.
+                let mask = SUPERVISOR_INTERRUPT_MASK & state.mideleg;
+                state.mie = (state.mie & !mask) | (new_val & mask);
+                state.resample_interrupts = true
+            } //sie
+            0x105 => state.stvec = new_val & !0b11, //Only direct mode is implemented
+            0x106 => state.scounteren = new_val,
+            0x10A => {} //senvcfg; all fields are read-only zero here
+            0x140 => state.sscratch = new_val,
+            0x141 => state.sepc = new_val & !1,
+            0x142 => state.scause = new_val,
+            0x143 => state.stval = new_val,
+            //Only SSIP is writable in sip, and only when it is delegated.
+            0x144 => {
+                let mask = INTERRUPT_SSI & state.mideleg;
+                state.mip = (state.mip & !mask) | (new_val & mask);
+                state.resample_interrupts = true
             }
+            0x180 => {
+                //Unsupported MODE values leave satp entirely unchanged (WARL).
+                if new_val >> 31 == 0 {
+                    state.satp = new_val
+                }
+            } //satp
+            0x300 => {
+                let mut mstatus = new_val & MSTATUS_MASK;
+                //MPP is WARL; a reserved encoding is coerced to machine mode.
+                if (mstatus >> MSTATUS_MPP_SHIFT) & 0b11 == 0b10 {
+                    mstatus |= 3 << MSTATUS_MPP_SHIFT;
+                }
+                state.mstatus = (state.mstatus & 0xffff_ffff_0000_0000) | mstatus as u64;
+                state.resample_interrupts = true
+            } //mstatus
+            0x301 => {} //misa is WARL; writes are ignored
+            0x302 => state.medeleg = new_val & MEDELEG_MASK,
+            0x303 => {
+                state.mideleg = new_val & MIDELEG_MASK;
+                state.resample_interrupts = true
+            }
+            0x304 => {
+                state.mie = new_val & IMPLEMENTED_INTERRUPT_MASK;
+                state.resample_interrupts = true
+            }
+            0x305 => state.mtvec = new_val & !0b11, //Only direct mode is implemented
+            0x306 => state.mcounteren = new_val,
+            0x30A => {} //menvcfg; all fields are read-only zero here
+            0x310 => {} //mstatush; MBE and SBE are read-only zero
+            0x31A => {} //menvcfgh
+            0x340 => state.mscratch = new_val,
+            0x341 => state.mepc = new_val & !1,
             0x342 => state.mcause = new_val,
             0x343 => state.mtval = new_val,
-            0xf11..=0xf15 => {
-                return Ok(false);
-            } //vendorId
-            0x301 => {
-                return Ok(false);
-            } //misa, XLEN=32, IMAC
-            _ => todo!("CSR 0x{csr:0x} not implemented"),
-        };
-        Ok(true)
+            //MSIP, MTIP and MEIP are device-driven; SSIP, STIP and SEIP are software-writable.
+            0x344 => {
+                state.mip = new_val & SUPERVISOR_INTERRUPT_MASK;
+                state.resample_interrupts = true
+            }
+            0x3a0..=0x3a3 => state.pmpcfg[(csr - 0x3a0) as usize] = new_val,
+            0x3b0..=0x3bf => state.pmpaddr[(csr - 0x3b0) as usize] = new_val,
+            _ => {
+                return Err(Trap {
+                    tcause: TrapType::IllegalInstruction,
+                    tval: 0,
+                });
+            }
+        }
+        Ok(())
     }
     fn sret(state: &mut CPUState, instr: u32) -> Result<(), Trap> {
-        todo!("SRET is not implemented")
+        let mstatus = state.mstatus as u32;
+        //TSR intercepts SRET in S-mode; U-mode may never execute it.
+        if state.privilege == PrivilegeMode::User
+            || (state.privilege == PrivilegeMode::Supervisor && mstatus & MSTATUS_TSR != 0)
+        {
+            return Err(Trap {
+                tcause: TrapType::IllegalInstruction,
+                tval: instr,
+            });
+        }
+        //SIE = SPIE, SPIE = 1, SPP = U; returning to a mode below M clears MPRV
+        let mut sstatus = mstatus;
+        let spie = sstatus & MSTATUS_SPIE != 0;
+        let spp = sstatus & MSTATUS_SPP != 0;
+        sstatus &= !(MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_MPRV);
+        if spie {
+            sstatus |= MSTATUS_SIE;
+        }
+        sstatus |= MSTATUS_SPIE;
+        state.mstatus = (state.mstatus & 0xffff_ffff_0000_0000) | sstatus as u64;
+        state.privilege = if spp {
+            PrivilegeMode::Supervisor
+        } else {
+            PrivilegeMode::User
+        };
+        state.pc = state.sepc.wrapping_sub(4);
+        //Interrupt trap conditions must be re-evaluated immediately after an xRET.
+        state.resample_interrupts = true;
+        Ok(())
     }
     fn mret(state: &mut CPUState, instr: u32) -> Result<(), Trap> {
-        //MIE = MPIE, MPIE = 1, MPP = M (the least privileged supported mode)
+        if state.privilege != PrivilegeMode::Machine {
+            return Err(Trap {
+                tcause: TrapType::IllegalInstruction,
+                tval: instr,
+            });
+        }
+        //MIE = MPIE, MPIE = 1, MPP = the least privileged supported mode
         let mut mstatus = state.mstatus as u32;
         let mpie = mstatus & MSTATUS_MPIE != 0;
         let mpp = (mstatus >> MSTATUS_MPP_SHIFT) & 0b11;
         mstatus &= !(MSTATUS_MIE | MSTATUS_MPIE | (0b11 << MSTATUS_MPP_SHIFT));
+        if mpp != 3 {
+            //Returning below M clears MPRV.
+            mstatus &= !MSTATUS_MPRV;
+        }
         if mpie {
             mstatus |= MSTATUS_MIE;
         }
         mstatus |= MSTATUS_MPIE;
-        mstatus |= 3 << MSTATUS_MPP_SHIFT;
         state.mstatus = (state.mstatus & 0xffff_ffff_0000_0000) | mstatus as u64;
         state.privilege = match mpp {
             0 => PrivilegeMode::User,
             1 => PrivilegeMode::Supervisor,
-            3 => PrivilegeMode::Machine,
-            _ => PrivilegeMode::Reserved,
+            _ => PrivilegeMode::Machine,
         };
         state.pc = state.mepc.wrapping_sub(4);
+        //Interrupt trap conditions must be re-evaluated immediately after an xRET.
+        state.resample_interrupts = true;
+        Ok(())
+    }
+    fn sfence_vma(state: &mut CPUState, instr: u32) -> Result<(), Trap> {
+        //SFENCE.VMA is a supervisor instruction; TVM intercepts it in S-mode.
+        let mstatus = state.mstatus as u32;
+        if state.privilege == PrivilegeMode::User
+            || (state.privilege == PrivilegeMode::Supervisor && mstatus & MSTATUS_TVM != 0)
+        {
+            return Err(Trap {
+                tcause: TrapType::IllegalInstruction,
+                tval: instr,
+            });
+        }
+        //No TLB yet; Sv32 adds the flush. All rs1/rs2 forms are legal and may be over-fenced.
         Ok(())
     }
     fn wfi(state: &mut CPUState, instr: u32) -> Result<(), Trap> {
+        //U-mode WFI must trap when S-mode is implemented and the wait is unbounded; TW
+        //extends the interception to S-mode.
+        let mstatus = state.mstatus as u32;
+        if state.privilege == PrivilegeMode::User
+            || (state.privilege == PrivilegeMode::Supervisor && mstatus & MSTATUS_TW != 0)
+        {
+            return Err(Trap {
+                tcause: TrapType::IllegalInstruction,
+                tval: instr,
+            });
+        }
         //CPU::step keeps the hart idle until an enabled interrupt is pending.
         state.wfi = true;
         Ok(())
@@ -953,14 +1238,11 @@ impl CPU {
         let rd = get_rd(instr);
         if rd != 0 {
             let val = Self::get_csr(state, mmu, csr)?;
-            if !Self::set_csr(state, csr, state.get_x(rs1))? {
-                todo!("Handle write in read-only registers")
-            }
+            Self::set_csr(state, csr, state.get_x(rs1))?;
             state.set_x(rd, val)
         } else {
-            if !Self::set_csr(state, csr, state.get_x(rs1))? {
-                todo!("Handle write in read-only registers")
-            }
+            //CSRRW with rd=x0 does not read, but it still writes.
+            Self::set_csr(state, csr, state.get_x(rs1))?
         }
         Ok(())
     }
@@ -968,50 +1250,34 @@ impl CPU {
         let csr = get_csr_num(instr);
         let rs1 = get_rs1(instr);
         let rd = get_rd(instr);
+        let val = Self::get_csr(state, mmu, csr)?;
         if rs1 != 0 {
-            let val = Self::get_csr(state, mmu, csr)?;
-            let set_bits = val | state.get_x(rs1);
-            if !Self::set_csr(state, csr, set_bits)? {
-                todo!("Handle read in write-only registers")
-            }
-            state.set_x(rd, val)
-        } else {
-            let val = Self::get_csr(state, mmu, csr)?;
-            state.set_x(rd, val)
+            Self::set_csr(state, csr, val | state.get_x(rs1))?;
         }
+        state.set_x(rd, val);
         Ok(())
     }
     fn csrrc(state: &mut CPUState, mmu: &mut MMU, instr: u32) -> Result<(), Trap> {
         let csr = get_csr_num(instr);
         let rs1 = get_rs1(instr);
         let rd = get_rd(instr);
+        let val = Self::get_csr(state, mmu, csr)?;
         if rs1 != 0 {
-            let val = Self::get_csr(state, mmu, csr)?;
-            let set_bits = val & !state.get_x(rs1);
-            if !Self::set_csr(state, csr, set_bits)? {
-                todo!("Handle read in write-only registers")
-            }
-            state.set_x(rd, val)
-        } else {
-            let val = Self::get_csr(state, mmu, csr)?;
-            state.set_x(rd, val)
+            Self::set_csr(state, csr, val & !state.get_x(rs1))?;
         }
+        state.set_x(rd, val);
         Ok(())
     }
     fn csrrwi(state: &mut CPUState, mmu: &mut MMU, instr: u32) -> Result<(), Trap> {
         let csr = get_csr_num(instr);
-        let rs1 = get_rs1(instr);
+        let zimm = get_rs1(instr) as u32;
         let rd = get_rd(instr);
         if rd != 0 {
             let val = Self::get_csr(state, mmu, csr)?;
-            if !Self::set_csr(state, csr, rs1 as u32)? {
-                todo!("Handle write in read-only registers")
-            }
+            Self::set_csr(state, csr, zimm)?;
             state.set_x(rd, val)
         } else {
-            if !Self::set_csr(state, csr, rs1 as u32)? {
-                todo!("Handle write in read-only registers")
-            }
+            Self::set_csr(state, csr, zimm)?
         }
         Ok(())
     }
@@ -1019,34 +1285,22 @@ impl CPU {
         let csr = get_csr_num(instr);
         let zimm = get_rs1(instr) as u32;
         let rd = get_rd(instr);
+        let val = Self::get_csr(state, mmu, csr)?;
         if zimm != 0 {
-            let val = Self::get_csr(state, mmu, csr)?;
-            let set_bits = val | zimm;
-            if !Self::set_csr(state, csr, set_bits)? {
-                todo!("Handle read in write-only registers")
-            }
-            state.set_x(rd, val)
-        } else {
-            let val = Self::get_csr(state, mmu, csr)?;
-            state.set_x(rd, val)
+            Self::set_csr(state, csr, val | zimm)?;
         }
+        state.set_x(rd, val);
         Ok(())
     }
     fn csrrci(state: &mut CPUState, mmu: &mut MMU, instr: u32) -> Result<(), Trap> {
         let csr = get_csr_num(instr);
         let zimm = get_rs1(instr) as u32;
         let rd = get_rd(instr);
+        let val = Self::get_csr(state, mmu, csr)?;
         if zimm != 0 {
-            let val = Self::get_csr(state, mmu, csr)?;
-            let clear_bits = val & !zimm;
-            if !Self::set_csr(state, csr, clear_bits)? {
-                todo!("Handle read in write-only registers")
-            }
-            state.set_x(rd, val)
-        } else {
-            let val = Self::get_csr(state, mmu, csr)?;
-            state.set_x(rd, val)
+            Self::set_csr(state, csr, val & !zimm)?;
         }
+        state.set_x(rd, val);
         Ok(())
     }
     fn mul(state: &mut CPUState, instr: u32) -> Result<(), Trap> {
@@ -1466,11 +1720,23 @@ impl CPUState {
             mepc: 0,
             mtval: 0,
             mcause: 0,
+            stvec: 0,
+            sepc: 0,
+            scause: 0,
+            stval: 0,
+            sscratch: 0,
+            satp: 0,
+            medeleg: 0,
+            mideleg: 0,
+            mcounteren: 0,
+            scounteren: 0,
             pmpcfg: [0; 4],
             pmpaddr: [0; 16],
             privilege: PrivilegeMode::Machine,
             wfi: false,
-            interrupt_pending: false,
+            machine_interrupt_pending: false,
+            supervisor_interrupt_pending: false,
+            resample_interrupts: false,
             reservation_slot: None,
             stopflag: None,
         }
@@ -1492,69 +1758,73 @@ impl CPUState {
     fn get_x(&self, x: u8) -> u32 {
         self.x[x as usize]
     }
-    pub fn process_trap(&mut self, trap: Trap) -> Result<(), EmulatorError> {
-        // println!("TRAP!\nTRAP!\nTRAP!\nTRAP!\n{}", trap);
-        if self.mtvec == 0 {
-            return Err(EmulatorError::UnsetTrapHandler);
+    //Route a trap to M or S. Traps never move from a more privileged mode to a less privileged
+    //one, and medeleg[11] (ecall from M) cannot be delegated.
+    fn trap_target(&self, cause: u32, interrupt: bool) -> PrivilegeMode {
+        if self.privilege == PrivilegeMode::Machine || self.privilege == PrivilegeMode::Reserved {
+            return PrivilegeMode::Machine;
         }
+        let delegated = if interrupt {
+            self.mideleg & (1 << cause) != 0
+        } else {
+            cause != 11 && self.medeleg & (1 << cause) != 0
+        };
+        if delegated {
+            PrivilegeMode::Supervisor
+        } else {
+            PrivilegeMode::Machine
+        }
+    }
+    pub fn process_trap(&mut self, trap: Trap) -> Result<(), EmulatorError> {
         //A trap ends any WFI stall; the handler has to run.
         self.wfi = false;
-        //MPIE = MIE, MIE = 0, MPP = the privilege that was interrupted
-        let mut mstatus = self.mstatus as u32;
-        let mie = mstatus & MSTATUS_MIE != 0;
-        mstatus &= !(MSTATUS_MIE | MSTATUS_MPIE | (0b11 << MSTATUS_MPP_SHIFT));
-        if mie {
-            mstatus |= MSTATUS_MPIE;
-        }
-        mstatus |= (self.privilege as u32) << MSTATUS_MPP_SHIFT;
-        self.mstatus = (self.mstatus & 0xffff_ffff_0000_0000) | mstatus as u64;
-        self.privilege = PrivilegeMode::Machine;
-        self.mepc = self.pc;
-        self.mcause = trap.tcause as u32;
-        self.mtval = trap.tval;
-        let mode = self.mtvec & 0b11;
-
-        match mode {
-            0 => {
-                self.pc = self.mtvec & !0b11;
-            }
-            1 => {
-                todo!("Vectored trap handling is not implemented")
+        let interrupt = trap.is_interupt();
+        let cause = trap.tcause as u32 & 0x7fff_ffff;
+        //Interrupts have no exception-specific datum; *tval becomes zero.
+        let tval = if interrupt { 0 } else { trap.tval };
+        match self.trap_target(cause, interrupt) {
+            PrivilegeMode::Supervisor => {
+                if self.stvec == 0 {
+                    return Err(EmulatorError::UnsetTrapHandler);
+                }
+                //SPIE = SIE, SIE = 0, SPP = the privilege that was interrupted
+                let mut sstatus = self.mstatus as u32;
+                let sie = sstatus & MSTATUS_SIE != 0;
+                sstatus &= !(MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP);
+                if sie {
+                    sstatus |= MSTATUS_SPIE;
+                }
+                if self.privilege == PrivilegeMode::Supervisor {
+                    sstatus |= MSTATUS_SPP;
+                }
+                self.mstatus = (self.mstatus & 0xffff_ffff_0000_0000) | sstatus as u64;
+                self.sepc = self.pc;
+                self.scause = trap.tcause as u32;
+                self.stval = tval;
+                self.privilege = PrivilegeMode::Supervisor;
+                self.pc = self.stvec & !0b11;
             }
             _ => {
-                unreachable!()
+                if self.mtvec == 0 {
+                    return Err(EmulatorError::UnsetTrapHandler);
+                }
+                //MPIE = MIE, MIE = 0, MPP = the privilege that was interrupted
+                let mut mstatus = self.mstatus as u32;
+                let mie = mstatus & MSTATUS_MIE != 0;
+                mstatus &= !(MSTATUS_MIE | MSTATUS_MPIE | (0b11 << MSTATUS_MPP_SHIFT));
+                if mie {
+                    mstatus |= MSTATUS_MPIE;
+                }
+                mstatus |= (self.privilege as u32) << MSTATUS_MPP_SHIFT;
+                self.mstatus = (self.mstatus & 0xffff_ffff_0000_0000) | mstatus as u64;
+                self.mepc = self.pc;
+                self.mcause = trap.tcause as u32;
+                self.mtval = tval;
+                self.privilege = PrivilegeMode::Machine;
+                self.pc = self.mtvec & !0b11;
             }
         }
-
-        //TODO
-
         Ok(())
-
-        //match trap.tcause {
-        //    TrapType::InstructionAddressMisaligned => todo!(),
-        //    TrapType::InstructionAccessFault => todo!(),
-        //    TrapType::IllegalInstruction => todo!(),
-        //    TrapType::Breakpoint => todo!(),
-        //    TrapType::LoadAddressMisaligned => todo!(),
-        //    TrapType::LoadAccessFault => todo!(),
-        //    TrapType::StoreAddressMisaligned => todo!(),
-        //    TrapType::StoreAccessFault => todo!(),
-        //    TrapType::EnvironmentCallFromUMode => todo!(),
-        //    TrapType::EnvironmentCallFromSMode => todo!(),
-        //    TrapType::EnvironmentCallFromMMode => todo!(),
-        //    TrapType::InstructionPageFault => todo!(),
-        //    TrapType::LoadPageFault => todo!(),
-        //    TrapType::StorePageFault => todo!(),
-        //    TrapType::UserSoftwareInterrupt => todo!(),
-        //    TrapType::SupervisorSoftwareInterrupt => todo!(),
-        //    TrapType::MachineSoftwareInterrupt => todo!(),
-        //    TrapType::UserTimerInterrupt => todo!(),
-        //    TrapType::SupervisorTimerInterrupt => todo!(),
-        //    TrapType::MachineTimerInterrupt => todo!(),
-        //    TrapType::UserExternalInterrupt => todo!(),
-        //    TrapType::SupervisorExternalInterrupt => todo!(),
-        //    TrapType::MachineExternalInterrupt => todo!(),
-        //}
     }
 }
 
