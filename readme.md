@@ -6,6 +6,14 @@ My small personal project targeted to write RISC-V emulator with decent accuracy
 Current target instruction set is rv32imafdc, with Sv32 virtual memory and user mode - essentially full RV32GC.
 
 
+
+
+https://github.com/user-attachments/assets/0e2e8eab-3d41-4dde-a272-1f81b0bc895d
+
+
+
+
+
 https://github.com/user-attachments/assets/7547b81b-a22c-4d94-8c82-70087b4962d8
 
 
