@@ -1,0 +1,78 @@
+#!/bin/sh
+#
+# Run Doom (PrBoom 2.5.0) on the emulator's 640x480 a8r8g8b8 simple-framebuffer.
+#
+#   doom               play interactively
+#   doom demo [N]      play demoN at normal speed (default 1)
+#   doom timedemo [N]  play demoN as fast as possible and print the fps
+#
+# Environment:
+#   DOOM_SOUND=1   drop -nosound (needs a working audio device)
+#
+set -u
+
+PRBOOM=${PRBOOM:-/usr/games/prboom}
+WAD_DIR=${WAD_DIR:-/usr/share/games/doom}
+
+# 640x480 must match rv-emu-rs-sv32.dts exactly. SDL 1.2's fbcon backend never
+# re-reads the mode after FBIOPUT_VSCREENINFO and takes the pitch from
+# finfo.line_length, while simplefb silently keeps its own mode, so a mismatch
+# shows up as a sheared image instead of a mode change.
+WIDTH=640
+HEIGHT=480
+VIDMODE=32
+
+# PrBoom 2.5.0 calls strlen(getenv("HOME")) without a NULL check (SDL/i_system.c),
+# and keeps its config in $HOME/.prboom/prboom.cfg.
+HOME=${HOME:-/root}
+export HOME
+export DOOMWADDIR="$WAD_DIR"
+
+usage()
+{
+	cat >&2 <<-EOF
+	usage: doom [game|demo|timedemo] [demo-number]
+	  doom               play interactively
+	  doom demo [N]      play demoN at normal speed (default 1)
+	  doom timedemo [N]  play demoN as fast as possible and print the fps
+	EOF
+	exit 2
+}
+
+mode=${1:-game}
+[ $# -gt 0 ] && shift
+
+case "$mode" in
+game) ;;
+demo | timedemo)
+	demo=${1:-1}
+	[ $# -gt 0 ] && shift
+	case "$demo" in
+	'' | *[!0-9]*) ;;                # "demo2", a lump name or a file name
+	*) demo="demo$demo" ;;           # bare number
+	esac
+	;;
+*) usage ;;
+esac
+
+if [ "$mode" = demo ]; then
+	set -- -playdemo "$demo" "$@"
+elif [ "$mode" = timedemo ]; then
+	set -- -timedemo "$demo" "$@"
+fi
+
+set -- -width "$WIDTH" -height "$HEIGHT" -vidmode "$VIDMODE" "$@"
+[ "${DOOM_SOUND:-0}" = 1 ] || set -- -nosound "$@"
+
+if [ "$mode" != timedemo ]; then
+	exec "$PRBOOM" "$@"
+fi
+
+# PrBoom prints the timedemo result through I_Error(), so it always exits with a
+# failure status. Treat the printed line as the real result.
+out=$("$PRBOOM" "$@" 2>&1)
+printf '%s\n' "$out"
+case "$out" in
+*"frames per second"*) exit 0 ;;
+esac
+exit 1

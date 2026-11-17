@@ -1,0 +1,13 @@
+# Board differences from arch/riscv/configs/defconfig + 32-bit.config.
+#
+# Everything else the image needs (8250 console, DEVTMPFS*_MOUNT, VIRTIO_MMIO,
+# VIRTIO_BLK, SIFIVE_PLIC, RISCV_TIMER, the gzip-compressed initramfs) is
+# already the default in the generic RISC-V defconfig.
+
+# Buildroot disables GCC plugins at build time; pin it here as well.
+# CONFIG_GCC_PLUGINS is not set
+
+# 640x480 a8r8g8b8 simple-framebuffer, with the Linux logo on the fbcon.
+CONFIG_FB_SIMPLE=y
+CONFIG_LOGO=y
+CONFIG_LOGO_LINUX_CLUT224=y

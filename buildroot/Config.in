@@ -1,0 +1,2 @@
+# No rv-emu-rs specific options yet. The board configuration lives in
+# configs/rv-emu-rs_defconfig and board/rv-emu-rs/.

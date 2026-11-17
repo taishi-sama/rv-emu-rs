@@ -1,0 +1,32 @@
+# RV32IMAFDC (Sv32 MMU), musl, internal toolchain, Linux + OpenSBI fw_payload.
+BR2_riscv=y
+BR2_RISCV_ISA_RVC=y
+BR2_RISCV_32=y
+BR2_TOOLCHAIN_BUILDROOT_MUSL=y
+BR2_BINUTILS_VERSION_2_46_X=y
+BR2_GCC_VERSION_16_X=y
+
+# Board files (kernel configuration and the rootfs overlay) live in this tree.
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RVEMURS_PATH)/board/rv-emu-rs/rootfs-overlay"
+
+# Kernel: arch defconfig + 32-bit fragment + board fragment (no rv32_defconfig since 7.1).
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RVEMURS_PATH)/board/rv-emu-rs/32-bit.config $(BR2_EXTERNAL_RVEMURS_PATH)/board/rv-emu-rs/linux.fragment"
+
+# Userspace: Doom (PrBoom) and the framebuffer test app.
+BR2_PACKAGE_PRBOOM=y
+BR2_PACKAGE_FB_TEST_APP=y
+BR2_PACKAGE_COREMARK=y
+BR2_PACKAGE_STRESS_NG=y
+
+# Single fw_payload.bin: OpenSBI and the kernel in one blob.
+BR2_TARGET_ROOTFS_INITRAMFS=y
+# BR2_TARGET_ROOTFS_TAR is not set
+BR2_TARGET_OPENSBI=y
+BR2_TARGET_OPENSBI_PLAT="generic"
+BR2_TARGET_OPENSBI_LINUX_PAYLOAD=y
+# Keep the FDT where the emulator put it (DTB_ADDRESS in src/emulator.rs).
+# OpenSBI otherwise relocates it to FW_PAYLOAD_FDT_OFFSET (0x2200000, i.e.
+# 0x82200000), which is inside the 39.4 MB kernel image and overwrites .rodata.
+BR2_TARGET_OPENSBI_ADDITIONAL_VARIABLES="FW_PAYLOAD_FDT_ADDR=0x87FFC000"

@@ -43,8 +43,20 @@ fn main() {
     //let path = "./test_asm/target/testtraps.s.elf";
     //let mut path: String = "./test_asm/target/testadd.s.elf".to_string();
     let mut args: Vec<String> = env::args().skip(1).collect();
+    //The kernel image needs Sv32 and 128 MiB of RAM; the initramfs does not fit in less.
+    const DEFAULT_DTB: &str = "rv-emu-rs-sv32.dtb";
     let no_display = args.iter().any(|arg| arg == "--no-display");
     args.retain(|arg| arg != "--no-display");
+    let payload = args.iter().any(|arg| arg == "--payload");
+    args.retain(|arg| arg != "--payload");
+    //Validate the payload invocation before opening anything, so a missing or extra argument
+    //reports the real problem instead of an unrelated file error.
+    if payload {
+        assert!(
+            (1..=2).contains(&args.len()),
+            "--payload takes <fw_payload.bin> [dtb], got {args:?}"
+        );
+    }
     if let Some(p) = args.first() {
         path = p.clone()
     }
@@ -57,15 +69,25 @@ fn main() {
     //Keep a host-side handle after the bus is moved into the MMU.
     let screen_buffer = bus.framebuffer.shared();
     stream_handle.play_raw(audio.convert_samples()).unwrap();
-    //Three paths select a firmware boot: <fw_dynamic.bin> <Image> <dtb>. The firmware starts in
-    //M-mode at the base of RAM, receives the device tree in a1 and a boot info record in a2, and
-    //jumps to the kernel in S-mode.
-    let emu = if args.len() >= 3 {
+    //Four boot paths: --payload <fw_payload.bin> [dtb] (OpenSBI and the kernel in one blob),
+    //<fw_dynamic.bin> <Image> <dtb> (M-mode firmware, boot info record in a2), a flat kernel
+    //Image booted in M-mode, or an ELF. The DTB defaults to rv-emu-rs-sv32.dtb when omitted.
+    let emu = if payload {
+        assert!(
+            !contents.starts_with(b"\x7fELF"),
+            "the payload must be a flat binary (fw_payload.bin), not an ELF"
+        );
+        let dtb_path = args.get(1).map(String::as_str).unwrap_or(DEFAULT_DTB);
+        let dtb = std::fs::read(dtb_path)
+            .unwrap_or_else(|err| panic!("could not read the device tree \"{dtb_path}\": {err}"));
+        println!("Loading payload \"{path}\" with dtb \"{dtb_path}\"");
+        emulator::Emulator::from_payload(contents, dtb, MMU::new(bus))
+    } else if args.len() >= 3 {
         let kernel_path = &args[1];
         let dtb_path = &args[2];
         assert!(
             !contents.starts_with(b"\x7fELF"),
-            "the firmware must be a flat binary (fw_jump.bin), not an ELF"
+            "the firmware must be a flat binary (fw_dynamic.bin), not an ELF"
         );
         let kernel = std::fs::read(kernel_path).unwrap_or_else(|err| {
             panic!("could not read the kernel image \"{kernel_path}\": {err}")
@@ -78,11 +100,11 @@ fn main() {
         println!("Loading elf \"{path}\"");
         emulator::Emulator::from_elf(contents, MMU::new(bus))
     } else {
-        //A flat kernel Image; the device tree defaults to the one built from rv-emu-rs.dts.
+        //A flat kernel Image; the device tree defaults to the one built from rv-emu-rs-sv32.dts.
         let dtb_path = args
             .get(1)
             .cloned()
-            .unwrap_or_else(|| "rv-emu-rs.dtb".to_string());
+            .unwrap_or_else(|| DEFAULT_DTB.to_string());
         println!("Loading image \"{path}\" with dtb \"{dtb_path}\"");
         let dtb = std::fs::read(&dtb_path)
             .unwrap_or_else(|err| panic!("could not read the device tree \"{dtb_path}\": {err}"));

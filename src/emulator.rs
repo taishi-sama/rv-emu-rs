@@ -123,6 +123,34 @@ impl Emulator {
         cpu.state.set_x(12, FW_DYNAMIC_INFO_ADDRESS);
         Emulator { cpu }
     }
+    //Boots an OpenSBI fw_payload image: the firmware and the Linux Image in a single blob, laid
+    //out by FW_PAYLOAD_OFFSET (0x400000 for rv32), so the loader needs no offset arithmetic.
+    //The firmware starts in M-mode at the base of RAM, receives the device tree in a1 and jumps
+    //to the kernel it embeds; a2 is unused.
+    pub fn from_payload(payload: Vec<u8>, dtb: Vec<u8>, mut mmu: MMU) -> Self {
+        Self::check_dtb(&dtb);
+        assert!(
+            payload.len() as u32 <= DTB_ADDRESS - RAM_ADDRESS,
+            "payload overlaps the device tree"
+        );
+        for (offset, byte) in payload.iter().enumerate() {
+            assert!(
+                mmu.bus.write_raw_to_ram(RAM_ADDRESS + offset as u32, *byte),
+                "payload does not fit in RAM"
+            );
+        }
+        for (offset, byte) in dtb.iter().enumerate() {
+            assert!(
+                mmu.bus.write_raw_to_ram(DTB_ADDRESS + offset as u32, *byte),
+                "device tree does not fit in the top 16 KiB of RAM"
+            );
+        }
+        let mut cpu = CPU::new(mmu);
+        cpu.state.pc = RAM_ADDRESS;
+        cpu.state.set_x(10, 0);
+        cpu.state.set_x(11, DTB_ADDRESS);
+        Emulator { cpu }
+    }
     fn check_dtb(dtb: &[u8]) {
         assert!(
             dtb.len() <= DTB_SIZE as usize,
