@@ -1,8 +1,8 @@
 //! F and D extension support.
-//! 
+//!
 //! IEEE 754 is evil and RISC-V's floating point specification is especially Extra Evil:tm:, so this part is mostly written by LLM and gated behind explicit feature flag.  
 //! As it maps to Berkey's soft-float practically 1 to 1, is practically lacking any non-trivial logic except CSR-juggling.
-//! 
+//!
 //! Floating-point registers are kept in their architectural 64-bit storage. Single-precision
 //! values are NaN-boxed by setting the upper 32 bits to ones; reading a register that is not
 //! properly boxed yields the canonical NaN, as required by the F extension.

@@ -9,7 +9,7 @@ Current target instruction set is rv32imafdc, with Sv32 virtual memory and user 
 https://github.com/user-attachments/assets/7547b81b-a22c-4d94-8c82-70087b4962d8
 
 
-Devices list contains a 16550-compatible UART, a write-only audio device with fixed rate and format, a CLINT and a syscon. Will be extended in the future.
+Devices list contains a 16550-compatible UART, a write-only audio device with fixed rate and format, a simple 640x480 framebuffer, a CLINT and a syscon. Will be extended in the future.
 
 
 # Credits 

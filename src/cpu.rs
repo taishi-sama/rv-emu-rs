@@ -106,7 +106,7 @@ const MIDELEG_MASK: u32 = SUPERVISOR_INTERRUPT_MASK;
 const COUNTEREN_CY: u32 = 1 << 0;
 const COUNTEREN_TM: u32 = 1 << 1;
 
-// RV32IMAC
+// RV32IMACFD
 // Everything that is not memory-related
 pub struct CPUState {
     x: [u32; 32],
@@ -1194,9 +1194,7 @@ impl CPU {
                 self.state.mip = (self.state.mip & !mask) | (new_val & mask);
                 self.state.resample_interrupts = true
             }
-            0x180 => {
-                self.mmu.set_satp(new_val)
-            } //satp
+            0x180 => self.mmu.set_satp(new_val), //satp
             0x300 => {
                 let mut mstatus = new_val & MSTATUS_MASK;
                 //MPP is WARL; a reserved encoding is coerced to machine mode.
@@ -1206,7 +1204,7 @@ impl CPU {
                 self.set_mstatus(mstatus);
                 self.state.resample_interrupts = true
             } //mstatus
-            0x301 => {} //misa is WARL; writes are ignored
+            0x301 => {}                          //misa is WARL; writes are ignored
             0x302 => self.state.medeleg = new_val & MEDELEG_MASK,
             0x303 => {
                 self.state.mideleg = new_val & MIDELEG_MASK;

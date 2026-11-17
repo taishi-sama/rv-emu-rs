@@ -2,7 +2,10 @@ use std::{
     env,
     fs::File,
     io::{self, Read, Write},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
     thread,
 };
 
@@ -14,6 +17,7 @@ use syscon::SysconEvent;
 pub mod bus;
 pub mod clint;
 pub mod cpu;
+pub mod display;
 pub mod elf_analyzer;
 pub mod emulator;
 pub mod errors;
@@ -25,6 +29,7 @@ pub mod mmu;
 pub mod ops_decode;
 pub mod primitive_audio;
 pub mod ram;
+pub mod simple_framebuffer;
 pub mod syscon;
 pub mod traps;
 pub mod uart;
@@ -37,7 +42,9 @@ fn main() {
 
     //let path = "./test_asm/target/testtraps.s.elf";
     //let mut path: String = "./test_asm/target/testadd.s.elf".to_string();
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    let no_display = args.iter().any(|arg| arg == "--no-display");
+    args.retain(|arg| arg != "--no-display");
     if let Some(p) = args.first() {
         path = p.clone()
     }
@@ -47,11 +54,13 @@ fn main() {
     image_file.read_to_end(&mut contents).unwrap();
 
     let (bus, audio) = MemoryBus::new();
+    //Keep a host-side handle after the bus is moved into the MMU.
+    let screen_buffer = bus.framebuffer.shared();
     stream_handle.play_raw(audio.convert_samples()).unwrap();
     //Three paths select a firmware boot: <fw_dynamic.bin> <Image> <dtb>. The firmware starts in
     //M-mode at the base of RAM, receives the device tree in a1 and a boot info record in a2, and
     //jumps to the kernel in S-mode.
-    let mut emu = if args.len() >= 3 {
+    let emu = if args.len() >= 3 {
         let kernel_path = &args[1];
         let dtb_path = &args[2];
         assert!(
@@ -79,14 +88,47 @@ fn main() {
             .unwrap_or_else(|err| panic!("could not read the device tree \"{dtb_path}\": {err}"));
         emulator::Emulator::from_image(contents, dtb, MMU::new(bus))
     };
+    let stop_emulator = Arc::new(AtomicBool::new(false));
+    let emulator_done = Arc::new(AtomicBool::new(false));
+    let emulator_thread = {
+        let stop_emulator = Arc::clone(&stop_emulator);
+        let emulator_done = Arc::clone(&emulator_done);
+        thread::Builder::new()
+            .name("emulator".to_string())
+            .spawn(move || {
+                let _done = EmulatorDoneGuard(emulator_done);
+                run_emulator(emu, stop_emulator);
+            })
+            .expect("could not spawn emulator thread")
+    };
+
+    if no_display {
+        println!("Display disabled (--no-display)");
+        let _ = emulator_thread.join();
+        return;
+    }
+
+    match display::run(screen_buffer, emulator_done) {
+        display::DisplayExit::WindowClosed => {
+            stop_emulator.store(true, Ordering::Release);
+        }
+        display::DisplayExit::EmulatorFinished | display::DisplayExit::InitFailed => {}
+    }
+    let _ = emulator_thread.join();
+}
+
+//Set the emulator-done flag on every exit path, including a panic in the emulator thread.
+struct EmulatorDoneGuard(Arc<AtomicBool>);
+
+impl Drop for EmulatorDoneGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+fn run_emulator(mut emu: emulator::Emulator, stop: Arc<AtomicBool>) {
     let mut stdin = io::stdin();
     println!("Start executing...");
-    let reg_names = [
-        "zo", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4",
-        "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4",
-        "t5", "t6",
-    ];
-
     let display = false;
     //Feed stdin into the guest's UART receive buffer while running normally. In display
     //(single-step) mode stdin is used for stepping instead.
@@ -112,11 +154,13 @@ fn main() {
         });
         Some(rx)
     };
-    let mut counter: u128 = 1;
     //Execute batch of instructions
-    const DEVICE_UPDATE_INTERVAL: usize = 16;
+    const DEVICE_UPDATE_INTERVAL: usize = 1024;
     let step_batch = if display { 1 } else { DEVICE_UPDATE_INTERVAL };
     loop {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
         //let display = true;
         let pc = emu.cpu.state.pc;
         if display {
@@ -134,9 +178,11 @@ fn main() {
         }
         let mut failed = false;
         for _ in 0..step_batch {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
             //WFI means the hart retires nothing; go back to handle_interrupt immediately instead of
             //burning the rest of the batch on no-op steps.
-
             if emu.cpu.state.wfi {
                 break;
             }
@@ -158,30 +204,6 @@ fn main() {
         if failed {
             break;
         }
-        // match res {
-        //     Ok(instr) => {
-        //         if display {
-        //             println!(
-        //                 "Executed instruction 0x{:0>8x} on address {:x}; instruction no {}",
-        //                 instr, pc, counter
-        //             );
-        //             for (ind, x) in emu.cpu.state.get_registers().into_iter().enumerate() {
-        //                 let reg_name = reg_names[ind];
-        //                 print!("{reg_name:<3}: {:^10x}; ", x);
-        //                 if ind % 8 == 7 && ind != 0 {
-        //                     println!()
-        //                 }
-        //             }
-        //             println!()
-        //         }
-        //     }
-        //     Err(trap) => {
-        //         //println!("Achieved trap: {} on address {:x}", trap, emu.cpu.pc);
-        //         println!("Encountered error! {trap:?}");
-        //         break;
-        //     }
-        // }
-
         if let Some(event) = emu.take_syscon_event() {
             match event {
                 SysconEvent::PowerOff => println!("Poweroff requested"),
@@ -190,12 +212,6 @@ fn main() {
             }
             break;
         }
-
-        // if counter%100000000 == 0 {
-        //    emu.cpu.process_trap(traps::Trap { tcause: traps::TrapType::EnvironmentCallFromMMode, tval: 0 }).unwrap();
-        // }
-
-        counter += 1;
     }
     println!("UART output buffer:");
     let mut v = vec![];
@@ -230,7 +246,10 @@ mod test {
             command.arg("build.sh").current_dir(test_asm_dir());
             //The FP test sources need an F/D-capable assembler, so skip them when the FPU is
             //compiled out.
-            command.env("RV_EMU_PLUS_FD", if cfg!(feature = "plus_FD") { "1" } else { "0" });
+            command.env(
+                "RV_EMU_PLUS_FD",
+                if cfg!(feature = "plus_FD") { "1" } else { "0" },
+            );
             let output = command
                 .output()
                 .map_err(|err| format!("could not run test_asm/build.sh: {err}"))?;

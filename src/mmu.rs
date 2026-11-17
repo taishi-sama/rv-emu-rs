@@ -49,11 +49,13 @@ impl AccessType {
 // Direct TLB buffer entry.
 #[derive(Clone, Copy, Default)]
 struct TlbEntry {
+    /// vpn[1] and vpn[0] of virtual address
     vpn: u32,
+    /// Translated page address
     pa_page: u32,
-    /// Physical address
+    /// leaf page table as itself
     pte: u32,
-    /// Physical address of entry
+    /// Physical address of leaf entry to refresh flags
     pte_addr: u32,
     /// Address-space identifier
     asid_tag: u16,
@@ -92,7 +94,6 @@ impl MMU {
     pub fn set_satp(&mut self, satp: u32) {
         self.satp = satp;
         self.current_asid_tag = ((satp >> 22) & 0x1ff) as u16 | ASID_VALIDITY_MARKER;
-        self.flush_tlb();
     }
     //Privilege and the SUM/MXR bits of mstatus complete the translation context. The CPU updates
     //them only when they actually change.
@@ -187,8 +188,24 @@ impl MMU {
         };
         Ok(pa_page | (va & PAGE_MASK))
     }
-    fn pte_ppn(pte: u32) -> u32 {
-        ((pte >> 20) << 10) | ((pte >> 10) & 0x3ff)
+    fn get_ppn(pte: u32) -> u32 {
+        (Self::get_ppn1(pte) << 10) | Self::get_ppn0(pte)
+    }
+    #[inline(always)]
+    fn get_ppn1(pte: u32) -> u32 {
+        pte >> 20
+    }
+    #[inline(always)]
+    fn get_ppn0(pte: u32) -> u32 {
+        (pte >> 10) & 0x3ff
+    }
+    #[inline(always)]
+    fn get_vpn1(va: u32) -> u32 {
+        (va >> 22) & 0x3ff
+    }
+    #[inline(always)]
+    fn get_vpn0(va: u32) -> u32 {
+        (va >> 12) & 0x3ff
     }
     //Walks Sv32 page tables. PTE reads are physical accesses; a bus error or a PPN that would
     //address above 4 GiB becomes an access fault of the original access type.
@@ -206,7 +223,7 @@ impl MMU {
         if root_ppn >= MAX_SUPPORTED_PPN {
             return Err(access_fault);
         }
-        let pte1_addr = (root_ppn << PAGE_SHIFT) | (((va >> 22) & 0x3ff) << 2);
+        let pte1_addr = (root_ppn << PAGE_SHIFT) | (Self::get_vpn1(va) << 2);
         let pte1 = self.bus.read_word(pte1_addr).map_err(|_| access_fault)?;
         if pte1 & PTE_V == 0 || pte1 & PTE_R == 0 && pte1 & PTE_W != 0 {
             return Err(page_fault);
@@ -214,11 +231,11 @@ impl MMU {
         let (pte, pte_addr, superpage) = if pte1 & (PTE_R | PTE_X) != 0 {
             (pte1, pte1_addr, true)
         } else {
-            let ppn = Self::pte_ppn(pte1);
+            let ppn = Self::get_ppn(pte1);
             if ppn >= MAX_SUPPORTED_PPN {
                 return Err(access_fault);
             }
-            let pte0_addr = (ppn << PAGE_SHIFT) | (((va >> 12) & 0x3ff) << 2);
+            let pte0_addr = (ppn << PAGE_SHIFT) | (Self::get_vpn0(va) << 2);
             let pte0 = self.bus.read_word(pte0_addr).map_err(|_| access_fault)?;
             if pte0 & PTE_V == 0
                 || pte0 & PTE_R == 0 && pte0 & PTE_W != 0
@@ -229,13 +246,13 @@ impl MMU {
             (pte0, pte0_addr, false)
         };
         //A superpage must be aligned: ppn[9:0] has to be zero.
-        if superpage && Self::pte_ppn(pte) & 0x3ff != 0 {
+        if superpage && Self::get_ppn0(pte) != 0 {
             return Err(page_fault);
         }
         if !self.permits(pte, access) {
             return Err(page_fault);
         }
-        let ppn = Self::pte_ppn(pte);
+        let ppn = Self::get_ppn(pte);
         if ppn >= MAX_SUPPORTED_PPN {
             return Err(access_fault);
         }

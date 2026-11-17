@@ -3,6 +3,7 @@ use crate::{
     mmdevice::MMdevice,
     primitive_audio::{self, PrimitiveAudioProducer, PrimitiveAudioReceiver},
     ram::RAM,
+    simple_framebuffer::SimpleScreenbuffer,
     syscon::Syscon,
     traps::{Trap, TrapType},
     uart::UART,
@@ -14,6 +15,7 @@ pub const UART_ADDRESS: u32 = 0x10000000;
 pub const PRIMITIVE_AUDIO_ADDRESS: u32 = 0x10000200;
 pub const CLINT_ADDRESS: u32 = 0x11000000;
 pub const SYSCON_ADDRESS: u32 = 0x11100000;
+pub const FRAMEBUFFER_ADDRESS: u32 = 0x30000000;
 
 //Range patterns need a single constant bound, so each device's exclusive region end is named here.
 const RAM_END: u32 = RAM_ADDRESS + RAM::MEMORY_REGION_SIZE;
@@ -21,6 +23,7 @@ const UART_END: u32 = UART_ADDRESS + UART::MEMORY_REGION_SIZE;
 const AUDIO_END: u32 = PRIMITIVE_AUDIO_ADDRESS + PrimitiveAudioReceiver::MEMORY_REGION_SIZE;
 const CLINT_END: u32 = CLINT_ADDRESS + Clint::MEMORY_REGION_SIZE;
 const SYSCON_END: u32 = SYSCON_ADDRESS + Syscon::MEMORY_REGION_SIZE;
+const FRAMEBUFFER_END: u32 = FRAMEBUFFER_ADDRESS + SimpleScreenbuffer::MEMORY_REGION_SIZE;
 
 pub const RAM_ADDRESS_END: u32 = RAM_END - 1;
 
@@ -50,6 +53,7 @@ pub struct MemoryBus {
     ram: RAM,
     pub uart: UART,
     pub audio: PrimitiveAudioReceiver,
+    pub framebuffer: SimpleScreenbuffer,
     pub clint: Clint,
     pub syscon: Syscon,
 }
@@ -62,6 +66,7 @@ impl MemoryBus {
                 ram: RAM::new(),
                 uart: UART::new(),
                 audio: audio_res,
+                framebuffer: SimpleScreenbuffer::new(),
                 clint: Clint::new(),
                 syscon: Syscon::new(),
             },
@@ -80,6 +85,9 @@ impl MemoryBus {
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => {
                 self.audio.fetch_halfword(address - PRIMITIVE_AUDIO_ADDRESS)
             }
+            FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => self
+                .framebuffer
+                .fetch_halfword(address - FRAMEBUFFER_ADDRESS),
             CLINT_ADDRESS..CLINT_END => self.clint.fetch_halfword(address - CLINT_ADDRESS),
             SYSCON_ADDRESS..SYSCON_END => self.syscon.fetch_halfword(address - SYSCON_ADDRESS),
             _ => Err(TrapType::InstructionAccessFault),
@@ -106,6 +114,9 @@ impl MemoryBus {
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => self
                 .audio
                 .read_word_atomically(address - PRIMITIVE_AUDIO_ADDRESS),
+            FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => self
+                .framebuffer
+                .read_word_atomically(address - FRAMEBUFFER_ADDRESS),
             CLINT_ADDRESS..CLINT_END => self.clint.read_word_atomically(address - CLINT_ADDRESS),
             SYSCON_ADDRESS..SYSCON_END => {
                 self.syscon.read_word_atomically(address - SYSCON_ADDRESS)
@@ -142,6 +153,9 @@ impl MemoryBus {
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => self
                 .audio
                 .write_word_atomically(address - PRIMITIVE_AUDIO_ADDRESS, word),
+            FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => self
+                .framebuffer
+                .write_word_atomically(address - FRAMEBUFFER_ADDRESS, word),
             CLINT_ADDRESS..CLINT_END => self
                 .clint
                 .write_word_atomically(address - CLINT_ADDRESS, word),
@@ -159,6 +173,9 @@ impl MemoryBus {
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => {
                 self.audio.read_word(address - PRIMITIVE_AUDIO_ADDRESS)
             }
+            FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => {
+                self.framebuffer.read_word(address - FRAMEBUFFER_ADDRESS)
+            }
             CLINT_ADDRESS..CLINT_END => self.clint.read_word(address - CLINT_ADDRESS),
             SYSCON_ADDRESS..SYSCON_END => self.syscon.read_word(address - SYSCON_ADDRESS),
             _ => Err(TrapType::LoadAccessFault),
@@ -172,6 +189,9 @@ impl MemoryBus {
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => {
                 self.audio.read_halfword(address - PRIMITIVE_AUDIO_ADDRESS)
             }
+            FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => self
+                .framebuffer
+                .read_halfword(address - FRAMEBUFFER_ADDRESS),
             CLINT_ADDRESS..CLINT_END => self.clint.read_halfword(address - CLINT_ADDRESS),
             SYSCON_ADDRESS..SYSCON_END => self.syscon.read_halfword(address - SYSCON_ADDRESS),
             _ => Err(TrapType::LoadAccessFault),
@@ -184,6 +204,9 @@ impl MemoryBus {
             UART_ADDRESS..UART_END => self.uart.read_byte(address - UART_ADDRESS),
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => {
                 self.audio.read_byte(address - PRIMITIVE_AUDIO_ADDRESS)
+            }
+            FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => {
+                self.framebuffer.read_byte(address - FRAMEBUFFER_ADDRESS)
             }
             CLINT_ADDRESS..CLINT_END => self.clint.read_byte(address - CLINT_ADDRESS),
             SYSCON_ADDRESS..SYSCON_END => self.syscon.read_byte(address - SYSCON_ADDRESS),
@@ -198,6 +221,9 @@ impl MemoryBus {
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => self
                 .audio
                 .write_word(address - PRIMITIVE_AUDIO_ADDRESS, word),
+            FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => self
+                .framebuffer
+                .write_word(address - FRAMEBUFFER_ADDRESS, word),
             CLINT_ADDRESS..CLINT_END => self.clint.write_word(address - CLINT_ADDRESS, word),
             SYSCON_ADDRESS..SYSCON_END => self.syscon.write_word(address - SYSCON_ADDRESS, word),
             _ => Err(TrapType::StoreAccessFault),
@@ -216,6 +242,7 @@ impl MemoryBus {
             (RAM_ADDRESS, RAM_END),
             (UART_ADDRESS, UART_END),
             (PRIMITIVE_AUDIO_ADDRESS, AUDIO_END),
+            (FRAMEBUFFER_ADDRESS, FRAMEBUFFER_END),
             (CLINT_ADDRESS, CLINT_END),
             (SYSCON_ADDRESS, SYSCON_END),
         ];
@@ -251,6 +278,9 @@ impl MemoryBus {
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => self
                 .audio
                 .write_halfword(address - PRIMITIVE_AUDIO_ADDRESS, halfword),
+            FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => self
+                .framebuffer
+                .write_halfword(address - FRAMEBUFFER_ADDRESS, halfword),
             CLINT_ADDRESS..CLINT_END => {
                 self.clint.write_halfword(address - CLINT_ADDRESS, halfword)
             }
@@ -268,6 +298,9 @@ impl MemoryBus {
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => self
                 .audio
                 .write_byte(address - PRIMITIVE_AUDIO_ADDRESS, byte),
+            FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => self
+                .framebuffer
+                .write_byte(address - FRAMEBUFFER_ADDRESS, byte),
             CLINT_ADDRESS..CLINT_END => self.clint.write_byte(address - CLINT_ADDRESS, byte),
             SYSCON_ADDRESS..SYSCON_END => self.syscon.write_byte(address - SYSCON_ADDRESS, byte),
             _ => Err(TrapType::StoreAccessFault),
