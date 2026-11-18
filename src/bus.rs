@@ -1,24 +1,31 @@
 use crate::{
     clint::Clint,
     mmdevice::MMdevice,
+    plic::{InterruptSource, Plic, PlicContext},
     primitive_audio::{self, PrimitiveAudioProducer, PrimitiveAudioReceiver},
     ram::RAM,
     simple_framebuffer::SimpleScreenbuffer,
     syscon::Syscon,
     traps::{Trap, TrapType},
-    uart::UART,
+    uart::{self, UART},
 };
 
 //Physical memory map. Devices only know their region size; the bus owns the addresses.
 pub const RAM_ADDRESS: u32 = 0x80000000;
+pub const PLIC_ADDRESS: u32 = 0x0c000000;
 pub const UART_ADDRESS: u32 = 0x10000000;
 pub const PRIMITIVE_AUDIO_ADDRESS: u32 = 0x10000200;
 pub const CLINT_ADDRESS: u32 = 0x11000000;
 pub const SYSCON_ADDRESS: u32 = 0x11100000;
 pub const FRAMEBUFFER_ADDRESS: u32 = 0x30000000;
 
+//The PLIC has 32 device sources plus the reserved source 0, matching riscv,ndev = <0x20> in
+//the device tree. Source 10 is the UART.
+const PLIC_SOURCES: u32 = 33;
+
 //Range patterns need a single constant bound, so each device's exclusive region end is named here.
 const RAM_END: u32 = RAM_ADDRESS + RAM::MEMORY_REGION_SIZE;
+const PLIC_END: u32 = PLIC_ADDRESS + Plic::MEMORY_REGION_SIZE;
 const UART_END: u32 = UART_ADDRESS + UART::MEMORY_REGION_SIZE;
 const AUDIO_END: u32 = PRIMITIVE_AUDIO_ADDRESS + PrimitiveAudioReceiver::MEMORY_REGION_SIZE;
 const CLINT_END: u32 = CLINT_ADDRESS + Clint::MEMORY_REGION_SIZE;
@@ -51,6 +58,7 @@ fn word_in_region(address: u32, start: u32, end: u32) -> bool {
 //physical addresses; translating them from the addresses issued by the CPU is the MMU's job.
 pub struct MemoryBus {
     ram: RAM,
+    pub plic: Plic,
     pub uart: UART,
     pub audio: PrimitiveAudioReceiver,
     pub framebuffer: SimpleScreenbuffer,
@@ -61,10 +69,15 @@ pub struct MemoryBus {
 impl MemoryBus {
     pub fn new() -> (Self, PrimitiveAudioProducer) {
         let (audio_res, audio_prod) = primitive_audio::create_primitive_audio_pair();
+        let mut plic = Plic::new(PLIC_SOURCES, crate::plic::CONTEXTS);
+        let uart_irq = plic
+            .register_source(uart::IRQ)
+            .expect("UART PLIC source must be available");
         (
             MemoryBus {
                 ram: RAM::new(),
-                uart: UART::new(),
+                plic,
+                uart: UART::new(uart_irq),
                 audio: audio_res,
                 framebuffer: SimpleScreenbuffer::new(),
                 clint: Clint::new(),
@@ -73,9 +86,16 @@ impl MemoryBus {
             audio_prod,
         )
     }
-    //TODO: implement PLIC and query it
-    pub fn external_interrupt_pending(&self) -> bool {
-        false
+    //Push the current device line levels into the PLIC. The CPU calls this before sampling its
+    //external-interrupt lines; devices never claim or complete interrupts themselves.
+    #[inline]
+    pub fn poll_irq_lines(&mut self) {
+        let MemoryBus { plic, uart, .. } = self;
+        uart.poll_irqs(plic);
+    }
+    #[inline]
+    pub fn external_interrupt_pending(&self, context: PlicContext) -> bool {
+        self.plic.pending_for(context)
     }
     // Need to implement only fetch 16 bits of instructions, CPU will fetch upper 16 bits for normal instructions after it decodes length.
     pub fn fetch_halfword(&mut self, address: u32) -> Result<u16, Trap> {
@@ -169,6 +189,7 @@ impl MemoryBus {
     pub fn read_word(&mut self, address: u32) -> Result<u32, Trap> {
         let result = match address {
             RAM_ADDRESS..RAM_END => self.ram.read_word(address - RAM_ADDRESS),
+            PLIC_ADDRESS..PLIC_END => self.plic.read_word(address - PLIC_ADDRESS),
             UART_ADDRESS..UART_END => self.uart.read_word(address - UART_ADDRESS),
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => {
                 self.audio.read_word(address - PRIMITIVE_AUDIO_ADDRESS)
@@ -217,6 +238,7 @@ impl MemoryBus {
     pub fn write_word(&mut self, address: u32, word: u32) -> Result<(), Trap> {
         let result = match address {
             RAM_ADDRESS..RAM_END => self.ram.write_word(address - RAM_ADDRESS, word),
+            PLIC_ADDRESS..PLIC_END => self.plic.write_word(address - PLIC_ADDRESS, word),
             UART_ADDRESS..UART_END => self.uart.write_word(address - UART_ADDRESS, word),
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => self
                 .audio
@@ -233,6 +255,14 @@ impl MemoryBus {
     //64-bit accesses are used by FLD/FSD. They are decomposed into two word accesses, but both
     //words are range-checked first so a bad second word cannot leave a partial store behind.
     pub fn read_dword(&mut self, address: u32) -> Result<u64, Trap> {
+        //The PLIC is a 32-bit register window; a 64-bit read would also trigger a claim side
+        //effect on the second word.
+        if (PLIC_ADDRESS..PLIC_END).contains(&address) {
+            return Err(Trap {
+                tcause: TrapType::LoadAccessFault,
+                tval: address,
+            });
+        }
         let low = self.read_word(address)?;
         let high = self.read_word(address.wrapping_add(4))?;
         Ok(low as u64 | ((high as u64) << 32))

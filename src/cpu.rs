@@ -247,7 +247,7 @@ impl CPU {
     }
     //Sample the interrupt sources, split them by delegation, wake WFI, and take the
     //highest-priority interrupt that is enabled for the current privilege. External-controller
-    //interrupts plug in through MMU::meip.
+    //interrupts plug in through MMU::meip and MMU::seip.
     /// Return Ok(true) if function handled interrupt, Ok(false) otherwise.
     pub fn handle_interrupt(&mut self) -> Result<bool, EmulatorError> {
         self.state.resample_interrupts = false;
@@ -1002,8 +1002,11 @@ impl CPU {
     }
 
     //Machine interrupt pending bits, also used as the mip CSR read value. MSIP and MTIP come
-    //from the CLINT; MEIP is the external controller line, hooked up through MMU::meip.
+    //from the CLINT; MEIP and SEIP are the PLIC's machine and supervisor external lines.
     fn pending_mip(state: &CPUState, mmu: &mut MMU) -> u32 {
+        //Refresh the PLIC from the devices before sampling its output lines. This also keeps
+        //mip/sip reads accurate when a guest has just changed a device's interrupt registers.
+        mmu.poll_irqs();
         let mut mip = state.mip & !MACHINE_INTERRUPT_MASK;
         if mmu.msip() {
             mip |= INTERRUPT_MSI;
@@ -1013,6 +1016,9 @@ impl CPU {
         }
         if mmu.meip() {
             mip |= INTERRUPT_MEI;
+        }
+        if mmu.seip() {
+            mip |= INTERRUPT_SEI;
         }
         mip
     }
@@ -1228,7 +1234,8 @@ impl CPU {
             0x341 => self.state.mepc = new_val & !1,
             0x342 => self.state.mcause = new_val,
             0x343 => self.state.mtval = new_val,
-            //MSIP, MTIP and MEIP are device-driven; SSIP, STIP and SEIP are software-writable.
+            //MSIP, MTIP and MEIP are device-driven. SSIP, STIP and SEIP are software-writable;
+            //SEIP is ORed with the PLIC's supervisor external line when read.
             0x344 => {
                 self.state.mip = new_val & SUPERVISOR_INTERRUPT_MASK;
                 self.state.resample_interrupts = true
@@ -1365,7 +1372,10 @@ impl CPU {
         let rd = get_rd(instr);
         let val = self.get_csr(csr)?;
         if rs1 != 0 {
-            let value = val | self.state.get_x(rs1);
+            //mip.SEIP reads as software bit OR PLIC line, but only a write from software may
+            //change the software bit. Do not feed the device line back into state.mip.
+            let write_base = if csr == 0x344 { self.state.mip } else { val };
+            let value = write_base | self.state.get_x(rs1);
             self.set_csr(csr, value)?;
         }
         self.state.set_x(rd, val);
@@ -1377,7 +1387,8 @@ impl CPU {
         let rd = get_rd(instr);
         let val = self.get_csr(csr)?;
         if rs1 != 0 {
-            let value = val & !self.state.get_x(rs1);
+            let write_base = if csr == 0x344 { self.state.mip } else { val };
+            let value = write_base & !self.state.get_x(rs1);
             self.set_csr(csr, value)?;
         }
         self.state.set_x(rd, val);
@@ -1402,7 +1413,8 @@ impl CPU {
         let rd = get_rd(instr);
         let val = self.get_csr(csr)?;
         if zimm != 0 {
-            let value = val | zimm;
+            let write_base = if csr == 0x344 { self.state.mip } else { val };
+            let value = write_base | zimm;
             self.set_csr(csr, value)?;
         }
         self.state.set_x(rd, val);
@@ -1414,7 +1426,8 @@ impl CPU {
         let rd = get_rd(instr);
         let val = self.get_csr(csr)?;
         if zimm != 0 {
-            let value = val & !zimm;
+            let write_base = if csr == 0x344 { self.state.mip } else { val };
+            let value = write_base & !zimm;
             self.set_csr(csr, value)?;
         }
         self.state.set_x(rd, val);
@@ -1961,8 +1974,9 @@ mod tests {
     use super::*;
     use crate::{
         bus::{MemoryBus, RAM_ADDRESS, RAM_ADDRESS_END},
+        mmdevice::MMdevice,
         mmu::MMU,
-        ops_decode::encode_r_type,
+        ops_decode::{encode_i_type, encode_r_type},
     };
 
     //Builds a CPU with `bytes` placed at `address` and the pc pointing at them.
@@ -2088,5 +2102,35 @@ mod tests {
         cpu.state.mstatus |= 3u64 << MSTATUS_MPP_SHIFT;
         cpu.mret(0x3020_0073).unwrap();
         assert_eq!(cpu.state.reservation_slot, None);
+    }
+
+    #[test]
+    fn mip_seip_is_software_writable_and_orred_with_the_plic_line() {
+        //csrrs x0, mip, x6: set SSIP while the PLIC drives SEIP. Only SSIP may land in the
+        //software mip state; the PLIC bit is read-only from the CSR's point of view.
+        let csrrs = encode_i_type(0x73, 0, 0b010, 6, 0x344);
+        let mut cpu = cpu_with_instruction(&csrrs.to_le_bytes());
+        let seip = INTERRUPT_SEI;
+        let ssip = INTERRUPT_SSI;
+
+        let line = cpu.mmu.bus.plic.register_source(11).unwrap();
+        cpu.mmu.bus.plic.write_word(11 * 4, 1).unwrap();
+        cpu.mmu.bus.plic.write_word(0x2080, 1 << 11).unwrap();
+        cpu.mmu.bus.plic.set_level(line, true);
+        assert_ne!(cpu.get_csr(0x344).unwrap() & seip, 0);
+
+        let mut regs = cpu.state.get_registers();
+        regs[6] = ssip;
+        cpu.state.set_registers(regs);
+        cpu.execute_instruction().unwrap();
+        assert_eq!(cpu.state.mip & ssip, ssip);
+        assert_eq!(cpu.state.mip & seip, 0);
+
+        //Direct software SEIP is allowed and is ORed with the controller line.
+        cpu.set_csr(0x344, seip).unwrap();
+        assert_ne!(cpu.get_csr(0x344).unwrap() & seip, 0);
+        cpu.set_csr(0x344, 0).unwrap();
+        cpu.mmu.bus.plic.set_level(line, false);
+        assert_eq!(cpu.get_csr(0x344).unwrap() & seip, 0);
     }
 }

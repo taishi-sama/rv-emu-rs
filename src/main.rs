@@ -30,6 +30,7 @@ pub mod manual_debugger;
 pub mod mmdevice;
 pub mod mmu;
 pub mod ops_decode;
+pub mod plic;
 pub mod primitive_audio;
 pub mod ram;
 pub mod simple_framebuffer;

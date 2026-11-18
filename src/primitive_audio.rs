@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use rb::{RB, RbConsumer, RbInspector, RbProducer};
 use rodio::Source;
@@ -38,8 +38,10 @@ impl PrimitiveAudioReceiver {
         self.sample_rate.load(Ordering::Relaxed)
     }
     fn set_sample_rate(&self, rate: u32) {
-        self.sample_rate
-            .store(rate.clamp(SAMPLE_RATE_MIN, SAMPLE_RATE_MAX), Ordering::Relaxed);
+        self.sample_rate.store(
+            rate.clamp(SAMPLE_RATE_MIN, SAMPLE_RATE_MAX),
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -138,7 +140,10 @@ mod tests {
     #[test]
     fn sample_rate_register_defaults_and_clamps() {
         let (mut receiver, producer) = create_primitive_audio_pair();
-        assert_eq!(receiver.read_word(SAMPLE_RATE_OFFSET), Ok(DEFAULT_SAMPLE_RATE));
+        assert_eq!(
+            receiver.read_word(SAMPLE_RATE_OFFSET),
+            Ok(DEFAULT_SAMPLE_RATE)
+        );
         assert_eq!(producer.sample_rate(), DEFAULT_SAMPLE_RATE);
 
         receiver.write_word(SAMPLE_RATE_OFFSET, 48000).unwrap();
@@ -176,10 +181,7 @@ mod tests {
     #[test]
     fn unimplemented_accesses_fault() {
         let (mut receiver, _producer) = create_primitive_audio_pair();
-        assert_eq!(
-            receiver.write_word(0, 0),
-            Err(TrapType::StoreAccessFault)
-        );
+        assert_eq!(receiver.write_word(0, 0), Err(TrapType::StoreAccessFault));
         assert_eq!(receiver.read_word(8), Err(TrapType::LoadAccessFault));
         assert_eq!(
             receiver.write_halfword(SAMPLE_RATE_OFFSET, 0),

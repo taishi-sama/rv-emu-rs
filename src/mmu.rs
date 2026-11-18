@@ -1,6 +1,7 @@
 use crate::{
     bus::{AtomicAccess, MemoryBus},
     cpu::{MSTATUS_MPP_SHIFT, MSTATUS_MPRV, MSTATUS_MXR, MSTATUS_SUM, PrivilegeMode},
+    plic::PlicContext,
     traps::{Trap, TrapType},
 };
 
@@ -381,8 +382,19 @@ impl MMU {
         self.bus.clint.mtip()
     }
     //Machine external interrupt line
+    #[inline]
     pub fn meip(&mut self) -> bool {
-        self.bus.external_interrupt_pending()
+        self.bus.external_interrupt_pending(PlicContext::Machine)
+    }
+    //Supervisor external interrupt line
+    #[inline]
+    pub fn seip(&mut self) -> bool {
+        self.bus.external_interrupt_pending(PlicContext::Supervisor)
+    }
+    //Sample device interrupt lines into the PLIC before the CPU samples its external lines.
+    #[inline]
+    pub fn poll_irqs(&mut self) {
+        self.bus.poll_irq_lines();
     }
     pub fn fetch_halfword(&mut self, address: u32) -> Result<u16, Trap> {
         let pa = self.translate(address, AccessType::Fetch)?;

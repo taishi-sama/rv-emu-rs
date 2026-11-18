@@ -4,6 +4,7 @@
  * S-mode device tree for rv-emu-rs: OpenSBI fw_jump + Linux Image.
  *
  * Memory map (src/bus.rs):
+ *   0x0c000000  PLIC, 32 device sources; UART is source 10
  *   0x10000000  UART, 16550-compatible registers at offsets 0-7
  *   0x10000200  audio: sample FIFO (0x0) and sample rate (0x4)
  *   0x11000000  CLINT: msip at 0x0, mtimecmp at 0x4000, mtime at 0xbff8
@@ -11,8 +12,8 @@
  *   0x30000000  framebuffer, 640x480 a8r8g8b8
  *   0x80000000  128 MiB RAM; the emulator places the DTB in the top 16 KiB
  *
- * There is no PLIC, so the UART node deliberately has no interrupts property:
- * the 8250 driver falls back to its timer-based polling mode.
+ * The PLIC has two contexts, machine and supervisor external, in the order listed by
+ * interrupts-extended. Linux uses the supervisor context; the UART is source 10.
  *
  * Build with: dtc -I dts -O dtb -o rv-emu-rs-sv32.dtb rv-emu-rs-sv32.dts
  */
@@ -88,6 +89,17 @@
             clock-frequency = <0x1000000>;
             reg = <0x00 0x10000000 0x00 0x100>;
             compatible = "ns16550a";
+            interrupt-parent = <&plic>;
+            interrupts = <0x0a>;
+        };
+
+        plic: interrupt-controller@c000000 {
+            reg = <0x00 0x0c000000 0x00 0x04000000>;
+            compatible = "sifive,plic-1.0.0", "riscv,plic0";
+            #interrupt-cells = <0x01>;
+            interrupt-controller;
+            riscv,ndev = <0x20>;
+            interrupts-extended = <&cpu_intc 0x0b>, <&cpu_intc 0x09>;
         };
 
         audio@10000200 {
