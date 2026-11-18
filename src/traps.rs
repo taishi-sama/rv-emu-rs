@@ -38,7 +38,7 @@ impl Trap {
     pub fn get_trap_cause(&self) -> u32 {
         self.tcause as u32
     }
-    pub fn is_interupt(&self) -> bool {
+    pub fn is_interrupt(&self) -> bool {
         self.tcause as u32 & INTERRUPT_BIT != 0
     }
 }

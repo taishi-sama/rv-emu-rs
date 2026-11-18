@@ -1,0 +1,24 @@
+#!/bin/sh
+#
+# Load the ALSA driver for the emulator's primitive audio device.
+#
+
+case "$1" in
+	start)
+		printf "Loading primitive-audio: "
+		if modprobe primitive_audio 2>/dev/null; then
+			echo "OK"
+		else
+			echo "FAIL"
+		fi
+		;;
+	stop)
+		rmmod primitive_audio 2>/dev/null
+		;;
+	restart|reload)
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac

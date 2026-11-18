@@ -5,7 +5,7 @@
  *
  * Memory map (src/bus.rs):
  *   0x10000000  UART, 16550-compatible registers at offsets 0-7
- *   0x10000200  audio
+ *   0x10000200  audio: sample FIFO (0x0) and sample rate (0x4)
  *   0x11000000  CLINT: msip at 0x0, mtimecmp at 0x4000, mtime at 0xbff8
  *   0x11100000  syscon: poweroff (0x5555) and reboot (0x7777)
  *   0x30000000  framebuffer, 640x480 a8r8g8b8
@@ -91,7 +91,7 @@
         };
 
         audio@10000200 {
-            reg = <0x00 0x10000200 0x00 0x04>;
+            reg = <0x00 0x10000200 0x00 0x08>;
             compatible = "rv-emu-rs,primitive-audio";
         };
 

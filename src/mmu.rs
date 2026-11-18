@@ -1,6 +1,6 @@
 use crate::{
     bus::{AtomicAccess, MemoryBus},
-    cpu::{MSTATUS_MXR, MSTATUS_SUM, PrivilegeMode},
+    cpu::{MSTATUS_MPP_SHIFT, MSTATUS_MPRV, MSTATUS_MXR, MSTATUS_SUM, PrivilegeMode},
     traps::{Trap, TrapType},
 };
 
@@ -65,6 +65,18 @@ pub struct MMU {
     pub bus: MemoryBus,
     satp: u32,
     privilege: PrivilegeMode,
+    //Privilege mstatus.MPRV redirects data accesses to (the value of mstatus.MPP), or None when
+    //MPRV is clear or MPP selects machine mode. Fetches are never redirected.
+    mprv_privilege: Option<PrivilegeMode>,
+    //Privilege data accesses are translated and protected at: the MPRV-selected mode while
+    //MPRV redirects, else the current mode.
+    data_privilege: PrivilegeMode,
+    //Cached translation switches for the hot path: fetches are translated unless the hart is
+    //in M-mode, loads and stores unless the MPRV-selected mode is M. Recomputed only when
+    //satp, the privilege mode or mstatus change; translate() reads one bool per access
+    //instead of rederiving the decision every time.
+    fetch_translated: bool,
+    data_translated: bool,
     sum: bool,
     mxr: bool,
     tlb: Vec<TlbEntry>,
@@ -77,15 +89,21 @@ const ASID_VALIDITY_MARKER: u16 = 0x8000;
 
 impl MMU {
     pub fn new(bus: MemoryBus) -> Self {
-        MMU {
+        let mut mmu = MMU {
             bus,
             satp: 0,
             privilege: PrivilegeMode::Machine,
+            mprv_privilege: None,
+            data_privilege: PrivilegeMode::Machine,
+            fetch_translated: false,
+            data_translated: false,
             sum: false,
             mxr: false,
             tlb: vec![TlbEntry::default(); TLB_ENTRIES],
             current_asid_tag: ASID_VALIDITY_MARKER,
-        }
+        };
+        mmu.recompute_translation_switches();
+        mmu
     }
     //satp,
     pub fn satp(&self) -> u32 {
@@ -94,40 +112,101 @@ impl MMU {
     pub fn set_satp(&mut self, satp: u32) {
         self.satp = satp;
         self.current_asid_tag = ((satp >> 22) & 0x1ff) as u16 | ASID_VALIDITY_MARKER;
+        self.recompute_translation_switches();
     }
     //Privilege and the SUM/MXR bits of mstatus complete the translation context. The CPU updates
     //them only when they actually change.
     pub fn set_privilege(&mut self, privilege: PrivilegeMode) {
         self.privilege = privilege;
+        self.recompute_translation_switches();
     }
     pub fn update_from_mstatus(&mut self, mstatus: u64) {
         self.sum = mstatus & MSTATUS_SUM as u64 != 0;
         self.mxr = mstatus & MSTATUS_MXR as u64 != 0;
+        self.mprv_privilege = Self::mprv_privilege_from_mstatus(mstatus);
+        self.recompute_translation_switches();
     }
-    //Used by the mmu-context-check feature to catch a missed sync after a context change.
+    //Derives the cached translation switches. Every path that changes satp, the privilege
+    //mode or mstatus funnels through set_satp/set_privilege/update_from_mstatus, so the
+    //per-access checks in translate() only read the cached fields.
+    fn recompute_translation_switches(&mut self) {
+        let (data_privilege, fetch_translated, data_translated) =
+            Self::translation_switches(self.satp, self.privilege, self.mprv_privilege);
+        self.data_privilege = data_privilege;
+        self.fetch_translated = fetch_translated;
+        self.data_translated = data_translated;
+    }
+    //Loads and stores are translated and protected as if the hart ran in the MPRV-selected
+    //mode; instruction fetch always uses the current mode. M-mode (and the never-entered
+    //reserved mode) bypasses translation entirely. mmu-context-check re-derives these values
+    //to prove the caches are never stale.
+    fn translation_switches(
+        satp: u32,
+        privilege: PrivilegeMode,
+        mprv_privilege: Option<PrivilegeMode>,
+    ) -> (PrivilegeMode, bool, bool) {
+        let data_privilege = mprv_privilege.unwrap_or(privilege);
+        let paging = satp >> 31 != 0;
+        (
+            data_privilege,
+            paging && !matches!(privilege, PrivilegeMode::Machine | PrivilegeMode::Reserved),
+            paging
+                && !matches!(
+                    data_privilege,
+                    PrivilegeMode::Machine | PrivilegeMode::Reserved
+                ),
+        )
+    }
+    //Privilege the effective-privilege redirect selects: MPP=U or S while MPRV is set; MPP=M
+    //(and the coerced reserved encoding, which cannot be written here) selects machine mode and
+    //thus no translation.
+    fn mprv_privilege_from_mstatus(mstatus: u64) -> Option<PrivilegeMode> {
+        if mstatus & MSTATUS_MPRV as u64 == 0 {
+            return None;
+        }
+        match (mstatus >> MSTATUS_MPP_SHIFT) & 0b11 {
+            0 => Some(PrivilegeMode::User),
+            1 => Some(PrivilegeMode::Supervisor),
+            _ => None,
+        }
+    }
+    //Used by the mmu-context-check feature to catch a missed sync after a context change. It
+    //verifies the CPU-owned inputs and the caches derived from them, so bypassing the setters
+    //shows up here instead of leaving silently stale translation flags.
     #[cfg(feature = "mmu-context-check")]
     pub fn context_matches(&self, privilege: PrivilegeMode, mstatus: u64) -> bool {
-        self.privilege == privilege
-            && self.sum == (mstatus & MSTATUS_SUM as u64 != 0)
-            && self.mxr == (mstatus & MSTATUS_MXR as u64 != 0)
+        let mprv_privilege = Self::mprv_privilege_from_mstatus(mstatus);
+        if self.privilege != privilege
+            || self.sum != (mstatus & MSTATUS_SUM as u64 != 0)
+            || self.mxr != (mstatus & MSTATUS_MXR as u64 != 0)
+            || self.mprv_privilege != mprv_privilege
+        {
+            return false;
+        }
+        let (data_privilege, fetch_translated, data_translated) =
+            Self::translation_switches(self.satp, privilege, mprv_privilege);
+        self.data_privilege == data_privilege
+            && self.fetch_translated == fetch_translated
+            && self.data_translated == data_translated
     }
     pub fn flush_tlb(&mut self) {
         self.tlb.fill(TlbEntry::default());
     }
-    //M-mode bypasses translation unless MPRV selects a less privileged mode, which is not
-    //implemented.
-    fn translation_enabled(&self) -> bool {
-        self.satp >> 31 != 0
-            && self.privilege != PrivilegeMode::Machine
-            && self.privilege != PrivilegeMode::Reserved
-    }
     #[inline]
     fn permits(&self, pte: u32, access: AccessType) -> bool {
+        //The effective privilege follows the access type: fetches run in the current mode,
+        //loads and stores in the MPRV-selected one. The SUM and MXR views of mstatus apply to
+        //both, as the spec makes MPRV accesses "as though the current privilege mode were set
+        //to MPP".
+        let privilege = match access {
+            AccessType::Fetch => self.privilege,
+            AccessType::Load | AccessType::Store => self.data_privilege,
+        };
         let readable = pte & PTE_R != 0 || (self.mxr && pte & PTE_X != 0);
         let writable = pte & PTE_W != 0;
         let executable = pte & PTE_X != 0;
         let user = pte & PTE_U != 0;
-        match self.privilege {
+        match privilege {
             PrivilegeMode::Machine | PrivilegeMode::Reserved => true,
             PrivilegeMode::Supervisor => {
                 if access == AccessType::Fetch {
@@ -151,7 +230,11 @@ impl MMU {
     }
     #[inline(always)]
     fn translate(&mut self, va: u32, access: AccessType) -> Result<u32, Trap> {
-        if !self.translation_enabled() {
+        let translates = match access {
+            AccessType::Fetch => self.fetch_translated,
+            AccessType::Load | AccessType::Store => self.data_translated,
+        };
+        if !translates {
             return Ok(va);
         }
         let vpn = va >> PAGE_SHIFT;
@@ -328,7 +411,7 @@ impl MMU {
             .map_err(|trap| Self::bus_error(address, trap.tcause))
     }
     pub fn read_word(&mut self, address: u32) -> Result<u32, Trap> {
-        if !self.translation_enabled() {
+        if !self.data_translated {
             return self.bus.read_word(address);
         }
         if address & PAGE_MASK <= PAGE_SIZE - 4 {
@@ -354,7 +437,7 @@ impl MMU {
     //across a page boundary. Translating every byte before the first bus access keeps a fault
     //from leaving a partially written store behind.
     pub fn read_dword(&mut self, address: u32) -> Result<u64, Trap> {
-        if !self.translation_enabled() {
+        if !self.data_translated {
             return self.bus.read_dword(address);
         }
         if address & PAGE_MASK <= PAGE_SIZE - 8 {
@@ -376,7 +459,7 @@ impl MMU {
         Ok(value)
     }
     pub fn read_halfword(&mut self, address: u32) -> Result<u16, Trap> {
-        if !self.translation_enabled() {
+        if !self.data_translated {
             return self.bus.read_halfword(address);
         }
         if address & PAGE_MASK <= PAGE_SIZE - 2 {
@@ -405,7 +488,7 @@ impl MMU {
             .map_err(|trap| Self::bus_error(address, trap.tcause))
     }
     pub fn write_word(&mut self, address: u32, word: u32) -> Result<(), Trap> {
-        if !self.translation_enabled() {
+        if !self.data_translated {
             return self.bus.write_word(address, word);
         }
         if address & PAGE_MASK <= PAGE_SIZE - 4 {
@@ -428,7 +511,7 @@ impl MMU {
         Ok(())
     }
     pub fn write_dword(&mut self, address: u32, value: u64) -> Result<(), Trap> {
-        if !self.translation_enabled() {
+        if !self.data_translated {
             return self.bus.write_dword(address, value);
         }
         if address & PAGE_MASK <= PAGE_SIZE - 8 {
@@ -452,7 +535,7 @@ impl MMU {
         Ok(())
     }
     pub fn write_halfword(&mut self, address: u32, halfword: u16) -> Result<(), Trap> {
-        if !self.translation_enabled() {
+        if !self.data_translated {
             return self.bus.write_halfword(address, halfword);
         }
         if address & PAGE_MASK <= PAGE_SIZE - 2 {
@@ -479,5 +562,95 @@ impl MMU {
         self.bus
             .write_byte(pa, byte)
             .map_err(|trap| Self::bus_error(address, trap.tcause))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::MemoryBus;
+
+    //A page table mapping 0x00400000 -> 0x80000000 as a user page, with the root table at
+    //0x80400000 and the leaf table at 0x80401000.
+    fn mmu_with_user_page() -> MMU {
+        let (mut bus, _audio) = MemoryBus::new();
+        for (offset, byte) in 0x1234_5678u32.to_le_bytes().iter().enumerate() {
+            assert!(bus.write_raw_to_ram(0x8000_0000 + offset as u32, *byte));
+        }
+        let level1 = 0x2010_0401u32; //pointer to the leaf table at 0x80401000
+        let level0 = 0x2000_00d7u32; //R|W|U|V|A|D leaf mapping to 0x80000000
+        for (address, word) in [(0x8040_0004u32, level1), (0x8040_1000u32, level0)] {
+            for (offset, byte) in word.to_le_bytes().iter().enumerate() {
+                assert!(bus.write_raw_to_ram(address + offset as u32, *byte));
+            }
+        }
+        let mut mmu = MMU::new(bus);
+        mmu.set_satp(0x8000_0000 | 0x8_0400);
+        mmu.set_privilege(PrivilegeMode::Machine);
+        mmu
+    }
+
+    //MPRV=1 with MPP=U: M-mode loads and stores are translated and protected as if the hart
+    //ran in U-mode; without MPRV they are untranslated, and 0x00400000 is behind no device.
+    #[test]
+    fn mprv_redirects_m_mode_data_accesses() {
+        let mut mmu = mmu_with_user_page();
+        mmu.update_from_mstatus(MSTATUS_MPRV as u64);
+        assert_eq!(mmu.read_word(0x0040_0000).unwrap(), 0x1234_5678);
+
+        mmu.update_from_mstatus(0);
+        assert_eq!(
+            mmu.read_word(0x0040_0000).unwrap_err().tcause,
+            TrapType::LoadAccessFault
+        );
+    }
+
+    //The redirected access obeys the redirected mode's protection: the page is user-only, so
+    //an MPP=S load needs SUM to reach it.
+    #[test]
+    fn mprv_uses_the_redirected_modes_permissions() {
+        let mut mmu = mmu_with_user_page();
+        mmu.update_from_mstatus((MSTATUS_MPRV | (1 << MSTATUS_MPP_SHIFT)) as u64);
+        assert_eq!(
+            mmu.read_word(0x0040_0000).unwrap_err().tcause,
+            TrapType::LoadPageFault
+        );
+
+        mmu.update_from_mstatus((MSTATUS_MPRV | MSTATUS_SUM | (1 << MSTATUS_MPP_SHIFT)) as u64);
+        assert_eq!(mmu.read_word(0x0040_0000).unwrap(), 0x1234_5678);
+    }
+
+    //MPRV never affects instruction fetches, which stay untranslated in M-mode.
+    #[test]
+    fn mprv_never_affects_fetches() {
+        let mut mmu = mmu_with_user_page();
+        mmu.update_from_mstatus(MSTATUS_MPRV as u64);
+        assert_eq!(
+            mmu.fetch_halfword(0x0040_0000).unwrap_err().tcause,
+            TrapType::InstructionAccessFault
+        );
+    }
+
+    //Translation also follows plain privilege changes, not just the MPRV redirect: leaving
+    //M-mode with paging on turns translation on, coming back turns it off. This is the
+    //recompute path every context switch rides on.
+    #[test]
+    fn privilege_changes_toggle_translation() {
+        let mut mmu = mmu_with_user_page();
+        //The user page is not readable from S-mode without SUM.
+        mmu.set_privilege(PrivilegeMode::Supervisor);
+        assert_eq!(
+            mmu.read_word(0x0040_0000).unwrap_err().tcause,
+            TrapType::LoadPageFault
+        );
+        //U-mode reads it through translation.
+        mmu.set_privilege(PrivilegeMode::User);
+        assert_eq!(mmu.read_word(0x0040_0000).unwrap(), 0x1234_5678);
+        //Back in M-mode the access is untranslated and hits no device.
+        mmu.set_privilege(PrivilegeMode::Machine);
+        assert_eq!(
+            mmu.read_word(0x0040_0000).unwrap_err().tcause,
+            TrapType::LoadAccessFault
+        );
     }
 }

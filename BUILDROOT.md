@@ -75,7 +75,8 @@ Everything board-specific lives in this directory, which is used as a Buildroot
 | `buildroot/external.desc` | br2-external tree name, `RVEMURS` |
 | `buildroot/configs/rv-emu-rs_defconfig` | the complete board configuration |
 | `buildroot/board/rv-emu-rs/32-bit.config` | copy of the kernel's 32-bit fragment |
-| `buildroot/board/rv-emu-rs/linux.fragment` | board kernel options (simplefb, logo) |
+| `buildroot/board/rv-emu-rs/linux.fragment` | board kernel options (simplefb, logo, ALSA) |
+| `buildroot/package/primitive-audio/` | out-of-tree ALSA driver for the audio device |
 | `buildroot/board/rv-emu-rs/rootfs-overlay/` | `/root/doom`, demo scripts, prboom config, WAD |
 
 
@@ -83,7 +84,8 @@ Everything board-specific lives in this directory, which is used as a Buildroot
 
 `fw_payload` relocates the FDT before entering the kernel. By default the
 destination is `FW_PAYLOAD_FDT_OFFSET = 0x2200000`, i.e. physical `0x82200000`,
-which is **inside the 39,454,208-byte kernel image** (`0x80400000..0x829A0608`).
+which is **inside the kernel image** (the Image starts at `0x80400000` and is
+about 39 MB in this configuration).
 The kernel is linked at `0xC0000000`, so that physical address is virtual
 `0xC1E00000` — the start of a `.rodata` block holding `"TRAILER!!!"`,
 `"070701"`, `"no cpio magic"` and every `unpack_to_rootfs()` error string.
@@ -138,6 +140,7 @@ fragment and adds `linux.fragment`, which only sets:
 CONFIG_FB_SIMPLE=y
 CONFIG_LOGO=y
 CONFIG_LOGO_LINUX_CLUT224=y
+CONFIG_SND=y
 # CONFIG_GCC_PLUGINS is not set
 ```
 
@@ -148,7 +151,6 @@ Everything else the image needs is already the default:
   `CONFIG_RISCV_TIMER`
 - `CONFIG_INITRAMFS_SOURCE` is injected by Buildroot when
   `BR2_TARGET_ROOTFS_INITRAMFS=y`, and the compression choice defaults to gzip
-  (~10.6 MiB embedded for the 25 MiB cpio)
 - `# CONFIG_DRM_SIMPLEDRM is not set` by default
 
 When bumping the kernel, refresh `32-bit.config` from the new
@@ -160,7 +162,36 @@ When bumping the kernel, refresh `32-bit.config` from the new
 | --- | --- |
 | `BR2_PACKAGE_PRBOOM=y` | Doom, pulls in SDL with the fbcon backend |
 | `BR2_PACKAGE_FB_TEST_APP=y` | `fb-test`, `fb-test-perf`, `fb-test-rect`, `fb-test-offset`, `fb-test-string` |
+| `BR2_PACKAGE_ALSA_LIB=y` | ALSA userspace; SDL is then built with its ALSA audio backend |
+| `BR2_PACKAGE_PRIMITIVE_AUDIO=y` | out-of-tree ALSA PCM driver for the emulator's audio device |
 | `BR2_PACKAGE_COREMARK=y`, `BR2_PACKAGE_STRESS_NG=y` | benchmarks, kept from the previous image |
+
+### Audio
+
+`buildroot/package/primitive-audio/` is an out-of-tree kernel module exposing
+the emulator's audio device as an ALSA playback PCM: stereo, S16_LE. The device
+has two MMIO registers at `0x10000200`:
+
+| Offset | Access | Meaning |
+| --- | --- | --- |
+| `0x0` | write halfword | enqueue one signed 16-bit sample |
+| `0x0` | read word | number of samples still queued |
+| `0x4` | read/write word | current sample rate in Hz (8000-192000, resets to 44100) |
+
+The driver advertises a continuous 8000-192000 Hz rate range and writes the
+rate the application chooses into the register during `hw_params`. It pushes
+one period per hrtimer tick, pacing playback to that rate. The emulator's host
+audio source reports the register value and returns a finite frame length, so
+rodio re-reads the rate and retunes playback when the guest reprograms the
+clock (`aplay -r 48000` changes the actual playback rate).
+
+The module is installed as `primitive_audio.ko` and loaded at boot by
+`/etc/init.d/S40primitive-audio` (`modprobe primitive_audio`). PrBoom uses
+SDL's default audio output, and SDL picks ALSA because `BR2_PACKAGE_ALSA_LIB`
+is enabled.
+
+The `doom` script enables sound by default; `DOOM_SOUND=0 ./doom` passes
+`-nosound` (for example when the host has no audio device).
 
 ### Boot image
 

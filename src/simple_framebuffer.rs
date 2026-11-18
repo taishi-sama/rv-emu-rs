@@ -239,15 +239,6 @@ impl Default for SimpleScreenbuffer {
 impl MMdevice for SimpleScreenbuffer {
     const MEMORY_REGION_SIZE: u32 = FRAMEBUFFER_SIZE;
 
-    fn fetch_halfword(&mut self, _offset: u32) -> Result<u16, TrapType> {
-        Err(TrapType::InstructionAccessFault)
-    }
-    fn read_word_atomically(&mut self, _offset: u32) -> Result<u32, TrapType> {
-        Err(TrapType::LoadAccessFault)
-    }
-    fn write_word_atomically(&mut self, _offset: u32, _word: u32) -> Result<(), TrapType> {
-        Err(TrapType::StoreAccessFault)
-    }
     fn read_word(&mut self, offset: u32) -> Result<u32, TrapType> {
         self.read(offset, 4)
     }

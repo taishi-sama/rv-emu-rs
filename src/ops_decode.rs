@@ -296,12 +296,17 @@ pub fn encode_u_type(opcode: u8, rd: u8, imm: i32) -> u32 {
     opcode | rd | imm
 }
 
+//Instruction-format parsers, one per base encoding: naive, independently written
+//bit-field extractions. The immediate-exhaustiveness tests below cross-check four of
+//them, and a planned disassembler will reuse all of them; they stay until then.
+#[expect(dead_code)]
 struct FormatB {
     rs1: u8,
     rs2: u8,
     imm: u32,
 }
 
+#[expect(dead_code)]
 fn parse_format_b(word: u32) -> FormatB {
     FormatB {
         rs1: ((word >> 15) & 0x1f) as u8, // [19:15]
@@ -319,12 +324,14 @@ fn parse_format_b(word: u32) -> FormatB {
     }
 }
 
+#[expect(dead_code)]
 struct FormatCSR {
     csr: u16,
     rs: u8,
     rd: u8,
 }
 
+#[expect(dead_code)]
 fn parse_format_csr(word: u32) -> FormatCSR {
     FormatCSR {
         csr: ((word >> 20) & 0xfff) as u16, // [31:20]
@@ -333,12 +340,14 @@ fn parse_format_csr(word: u32) -> FormatCSR {
     }
 }
 
+#[expect(dead_code)]
 struct FormatI {
     rd: u8,
     rs1: u8,
     imm: u32,
 }
 
+#[expect(dead_code)]
 fn parse_format_i(word: u32) -> FormatI {
     FormatI {
         rd: ((word >> 7) & 0x1f) as u8,   // [11:7]
@@ -354,11 +363,13 @@ fn parse_format_i(word: u32) -> FormatI {
     }
 }
 
+#[expect(dead_code)]
 struct FormatJ {
     rd: u8,
     imm: u32,
 }
 
+#[expect(dead_code)]
 fn parse_format_j(word: u32) -> FormatJ {
     FormatJ {
         rd: ((word >> 7) & 0x1f) as u8, // [11:7]
@@ -375,12 +386,14 @@ fn parse_format_j(word: u32) -> FormatJ {
     }
 }
 
+#[expect(dead_code)]
 struct FormatR {
     rd: u8,
     rs1: u8,
     rs2: u8,
 }
 
+#[expect(dead_code)]
 fn parse_format_r(word: u32) -> FormatR {
     FormatR {
         rd: ((word >> 7) & 0x1f) as u8,   // [11:7]
@@ -390,6 +403,7 @@ fn parse_format_r(word: u32) -> FormatR {
 }
 
 // has rs3
+#[expect(dead_code)]
 struct FormatR2 {
     rd: u8,
     rs1: u8,
@@ -397,6 +411,7 @@ struct FormatR2 {
     rs3: u8,
 }
 
+#[expect(dead_code)]
 fn parse_format_r2(word: u32) -> FormatR2 {
     FormatR2 {
         rd: ((word >> 7) & 0x1f) as u8,   // [11:7]
@@ -406,12 +421,14 @@ fn parse_format_r2(word: u32) -> FormatR2 {
     }
 }
 
+#[expect(dead_code)]
 struct FormatS {
     rs1: u8,
     rs2: u8,
     imm: u32,
 }
 
+#[expect(dead_code)]
 fn parse_format_s(word: u32) -> FormatS {
     FormatS {
         rs1: ((word >> 15) & 0x1f) as u8, // [19:15]
@@ -428,11 +445,13 @@ fn parse_format_s(word: u32) -> FormatS {
     }
 }
 
+#[expect(dead_code)]
 struct FormatU {
     rd: usize,
     imm: u64,
 }
 
+#[expect(dead_code)]
 fn parse_format_u(word: u32) -> FormatU {
     FormatU {
         rd: ((word >> 7) & 0x1f) as usize, // [11:7]
@@ -460,50 +479,60 @@ mod tests {
         get_compressed_c_fsdsp_offset, get_compressed_c_fswsp_offset, get_imm_j_type,
         parse_format_b, parse_format_i, parse_format_j, parse_format_s,
     };
+    //The immediate decoders permute fixed instruction bits, so enumerating every value of the
+    //bits each decoder reads, with the remaining bits fixed at zero and at one, covers every
+    //distinct immediate an encoding can express. Sweeping all 2^32 words instead would take
+    //minutes in a debug build for the same coverage.
+    fn imm_samples(relevant: u32) -> Vec<u32> {
+        let bits: Vec<u32> = (0..32).filter(|&bit| relevant & (1 << bit) != 0).collect();
+        let mut samples = Vec::with_capacity(2 * (1usize << bits.len()));
+        for subset in 0..(1usize << bits.len()) {
+            let mut word = 0;
+            for (index, &bit) in bits.iter().enumerate() {
+                if subset & (1 << index) != 0 {
+                    word |= 1 << bit;
+                }
+            }
+            samples.push(word);
+            samples.push(word | !relevant);
+        }
+        samples
+    }
+
+    //B-type immediates read instr[31:25], instr[11:8] and instr[7].
     #[test]
     fn super_test_b() {
-        for word in 0..=u32::MAX {
+        for word in imm_samples(0xfe00_0f80) {
             let r = parse_format_b(word);
             let l = get_imm_b_type(word);
-            if r.imm != l {
-                assert_eq!(l, r.imm);
-            }
+            assert_eq!(l, r.imm, "b-type immediate of 0x{word:08x}");
         }
     }
+    //I-type immediates read instr[31:20].
     #[test]
     fn super_test_i() {
-        for word in 0..=u32::MAX {
+        for word in imm_samples(0xfff0_0000) {
             let r = parse_format_i(word);
             let l = get_imm_i_type(word);
-            if r.imm != l {
-                let imm = r.imm;
-                println!("{imm:00$b}", 32);
-                assert_eq!(l, r.imm);
-            }
+            assert_eq!(l, r.imm, "i-type immediate of 0x{word:08x}");
         }
     }
+    //S-type immediates read instr[31:25] (funct7) and instr[11:7] (rd).
     #[test]
     fn super_test_s() {
-        for word in 0..=u32::MAX {
+        for word in imm_samples(0xfe00_0f80) {
             let r = parse_format_s(word);
             let l = get_imm_s_type(word);
-            if r.imm != l {
-                let imm = r.imm;
-                println!("{imm:00$b}", 32);
-                assert_eq!(l, r.imm);
-            }
+            assert_eq!(l, r.imm, "s-type immediate of 0x{word:08x}");
         }
     }
+    //J-type immediates read instr[31:12].
     #[test]
     fn super_test_j() {
-        for word in 0..=u32::MAX {
+        for word in imm_samples(0xffff_f000) {
             let r = parse_format_j(word);
             let l = get_imm_j_type(word);
-            if r.imm != l {
-                let imm = r.imm;
-                println!("{imm:00$b}", 32);
-                assert_eq!(l, r.imm);
-            }
+            assert_eq!(l, r.imm, "j-type immediate of 0x{word:08x}");
         }
     }
 

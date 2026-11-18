@@ -50,15 +50,6 @@ impl Clint {
 impl MMdevice for Clint {
     const MEMORY_REGION_SIZE: u32 = 0x10000;
 
-    fn fetch_halfword(&mut self, _offset: u32) -> Result<u16, TrapType> {
-        Err(TrapType::InstructionAccessFault)
-    }
-    fn read_word_atomically(&mut self, _offset: u32) -> Result<u32, TrapType> {
-        Err(TrapType::LoadAccessFault)
-    }
-    fn write_word_atomically(&mut self, _offset: u32, _word: u32) -> Result<(), TrapType> {
-        Err(TrapType::StoreAccessFault)
-    }
     fn read_word(&mut self, offset: u32) -> Result<u32, TrapType> {
         Ok(match offset {
             MSIP_OFFSET => self.banks[0].msip as u32,
@@ -84,17 +75,5 @@ impl MMdevice for Clint {
             _ => return Err(TrapType::StoreAccessFault),
         }
         Ok(())
-    }
-    fn read_halfword(&mut self, _offset: u32) -> Result<u16, TrapType> {
-        Err(TrapType::LoadAccessFault)
-    }
-    fn write_halfword(&mut self, _offset: u32, _halfword: u16) -> Result<(), TrapType> {
-        Err(TrapType::StoreAccessFault)
-    }
-    fn read_byte(&mut self, _offset: u32) -> Result<u8, TrapType> {
-        Err(TrapType::LoadAccessFault)
-    }
-    fn write_byte(&mut self, _offset: u32, _byte: u8) -> Result<(), TrapType> {
-        Err(TrapType::StoreAccessFault)
     }
 }

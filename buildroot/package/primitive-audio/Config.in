@@ -1,0 +1,10 @@
+config BR2_PACKAGE_PRIMITIVE_AUDIO
+	bool "primitive-audio kernel module"
+	depends on BR2_LINUX_KERNEL
+	help
+	  ALSA PCM driver for the rv-emu-rs audio device at 0x10000200.
+	  Exposes stereo S16_LE playback at 8000-192000 Hz; the driver
+	  writes the application's rate into the device's sample-rate
+	  register and paces the sample FIFO from an hrtimer.
+
+	  Required by PrBoom (Doom) for sound output.

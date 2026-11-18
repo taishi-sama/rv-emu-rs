@@ -47,9 +47,9 @@ const MSTATUS_MIE: u32 = 1 << 3;
 const MSTATUS_SPIE: u32 = 1 << 5;
 const MSTATUS_MPIE: u32 = 1 << 7;
 const MSTATUS_SPP: u32 = 1 << 8;
-const MSTATUS_MPP_SHIFT: u32 = 11;
+pub(crate) const MSTATUS_MPP_SHIFT: u32 = 11;
 pub(crate) const MSTATUS_FS: u32 = 0b11 << 13;
-const MSTATUS_MPRV: u32 = 1 << 17;
+pub(crate) const MSTATUS_MPRV: u32 = 1 << 17;
 pub(crate) const MSTATUS_SUM: u32 = 1 << 18;
 pub(crate) const MSTATUS_MXR: u32 = 1 << 19;
 const MSTATUS_TVM: u32 = 1 << 20;
@@ -1272,6 +1272,8 @@ impl CPU {
         };
         self.set_privilege(privilege);
         self.state.pc = self.state.sepc.wrapping_sub(4);
+        //xRET ends any LR/SC sequence it interrupts, like a trap does.
+        self.state.reservation_slot = None;
         //Interrupt trap conditions must be re-evaluated immediately after an xRET.
         self.state.resample_interrupts = true;
         Ok(())
@@ -1304,6 +1306,8 @@ impl CPU {
         };
         self.set_privilege(privilege);
         self.state.pc = self.state.mepc.wrapping_sub(4);
+        //xRET ends any LR/SC sequence it interrupts, like a trap does.
+        self.state.reservation_slot = None;
         //Interrupt trap conditions must be re-evaluated immediately after an xRET.
         self.state.resample_interrupts = true;
         Ok(())
@@ -1820,7 +1824,8 @@ impl CPU {
     pub fn process_trap(&mut self, trap: Trap) -> Result<(), EmulatorError> {
         //A trap ends any WFI stall; the handler has to run.
         self.state.wfi = false;
-        let interrupt = trap.is_interupt();
+        self.state.reservation_slot = None;
+        let interrupt = trap.is_interrupt();
         let cause = trap.tcause as u32 & 0x7fff_ffff;
         //Interrupts have no exception-specific datum; *tval becomes zero.
         let tval = if interrupt { 0 } else { trap.tval };
@@ -2040,5 +2045,48 @@ mod tests {
             //A trap is raised before the pc is advanced
             assert_eq!(cpu.state.pc, RAM_ADDRESS);
         }
+    }
+
+    //The event that breaks an LR/SC reservation is unspecified by the architecture; traps and
+    //xRET do so here (a same-hart store between LR and SC deliberately does not), so SC
+    //reports failure after either one.
+    #[test]
+    fn trap_breaks_the_reservation() {
+        //lr.w x5, 0(x10); the dispatch matches the A-extension on bits 31:27 (the rs3 slot),
+        //so LR.W's funct7 is 0b00010 << 2.
+        let lr = encode_r_type(0b0101111, 5, 0b010, 10, 0, 0b00010 << 2);
+        let mut cpu = cpu_with_instruction(&lr.to_le_bytes());
+        let mut regs = cpu.state.get_registers();
+        regs[10] = RAM_ADDRESS + 0x1000;
+        cpu.state.set_registers(regs);
+        cpu.state.mtvec = RAM_ADDRESS + 0x800;
+
+        cpu.execute_instruction().unwrap();
+        assert_eq!(cpu.state.reservation_slot, Some(RAM_ADDRESS + 0x1000));
+
+        cpu.process_trap(Trap {
+            tcause: TrapType::Breakpoint,
+            tval: 0,
+        })
+        .unwrap();
+        assert_eq!(cpu.state.reservation_slot, None);
+    }
+
+    #[test]
+    fn mret_breaks_the_reservation() {
+        //lr.w x5, 0(x10); funct7 is 0b00010 << 2, see trap_breaks_the_reservation.
+        let lr = encode_r_type(0b0101111, 5, 0b010, 10, 0, 0b00010 << 2);
+        let mut cpu = cpu_with_instruction(&lr.to_le_bytes());
+        let mut regs = cpu.state.get_registers();
+        regs[10] = RAM_ADDRESS + 0x1000;
+        cpu.state.set_registers(regs);
+
+        cpu.execute_instruction().unwrap();
+        assert_eq!(cpu.state.reservation_slot, Some(RAM_ADDRESS + 0x1000));
+
+        //MPP=M keeps the hart in machine mode; the reservation still drops.
+        cpu.state.mstatus |= 3u64 << MSTATUS_MPP_SHIFT;
+        cpu.mret(0x3020_0073).unwrap();
+        assert_eq!(cpu.state.reservation_slot, None);
     }
 }

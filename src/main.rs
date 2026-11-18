@@ -1,7 +1,7 @@
 use std::{
-    env,
-    fs::File,
+    fs,
     io::{self, Read, Write},
+    process,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, Ordering},
@@ -12,6 +12,7 @@ use std::{
 };
 
 use bus::MemoryBus;
+use clap::Parser;
 use mmu::MMU;
 use rodio::{OutputStream, Source};
 use syscon::SysconEvent;
@@ -37,65 +38,108 @@ pub mod traps;
 pub mod uart;
 //pub mod gdb;
 
-fn main() {
-    //let mut m = mmu::MMU::default();
-    let mut path = "./bad_apple/target/riscv32imac-unknown-none-elf/release/bad_apple".to_string();
-    //let mut path = "./bad_apple/target/riscv32i-unknown-none-elf/debug/bad_apple".to_string();
+//The kernel image needs Sv32 and 128 MiB of RAM; the initramfs does not fit in less.
+const DEFAULT_DTB: &str = "rv-emu-rs-sv32.dtb";
+//Booted when no image path is passed on the command line.
+const DEFAULT_IMAGE: &str = "./bad_apple/target/riscv32imac-unknown-none-elf/release/bad_apple";
 
-    //let path = "./test_asm/target/testtraps.s.elf";
-    //let mut path: String = "./test_asm/target/testadd.s.elf".to_string();
-    let mut args: Vec<String> = env::args().skip(1).collect();
-    //The kernel image needs Sv32 and 128 MiB of RAM; the initramfs does not fit in less.
-    const DEFAULT_DTB: &str = "rv-emu-rs-sv32.dtb";
-    let no_display = args.iter().any(|arg| arg == "--no-display");
-    args.retain(|arg| arg != "--no-display");
-    let payload = args.iter().any(|arg| arg == "--payload");
-    args.retain(|arg| arg != "--payload");
-    //Validate the payload invocation before opening anything, so a missing or extra argument
-    //reports the real problem instead of an unrelated file error.
-    if payload {
-        assert!(
-            (1..=2).contains(&args.len()),
-            "--payload takes <fw_payload.bin> [dtb], got {args:?}"
-        );
+//Command line. Help, version, unknown-option diagnostics and the `--` separator come from
+//clap; the boot mode is picked from the flag, the number of paths and the image contents.
+#[derive(Parser)]
+#[command(
+    name = "rv-emu-rs",
+    version,
+    about = "RISC-V RV32GC emulator",
+    after_help = "\
+Boot modes:
+  <image>                  an ELF executable or a flat kernel Image; the device tree
+                           defaults to rv-emu-rs-sv32.dtb
+  <image> <dtb>            flat kernel Image with an explicit device tree
+  <fw> <Image> <dtb>       OpenSBI fw_dynamic.bin firmware, kernel Image and device tree
+  --payload <blob> [dtb]   flat OpenSBI fw_payload.bin blob
+
+Without an image the bad_apple demo build is used."
+)]
+struct Args {
+    /// Treat <image> as a flat OpenSBI fw_payload.bin blob
+    #[arg(long)]
+    payload: bool,
+
+    /// Run headless without the framebuffer window
+    #[arg(long)]
+    no_display: bool,
+
+    /// Image to boot: an ELF, a flat kernel Image, or (with --payload) a fw_payload.bin
+    /// blob; the firmware boot takes all three paths <fw_dynamic.bin> <Image> <dtb>.
+    /// Defaults to the bad_apple demo build.
+    #[arg(value_name = "IMAGE [DTB]", num_args = 0..=3)]
+    paths: Vec<String>,
+}
+
+fn exit_with(message: impl std::fmt::Display) -> ! {
+    eprintln!("error: {message}");
+    process::exit(1);
+}
+
+fn read_or_exit(path: &str, what: &str) -> Vec<u8> {
+    fs::read(path).unwrap_or_else(|err| {
+        eprintln!("error: could not read the {what} \"{path}\": {err}");
+        process::exit(1);
+    })
+}
+
+fn main() {
+    let args = Args::parse();
+    //The payload boot has no firmware-triple form.
+    if args.payload && !(1..=2).contains(&args.paths.len()) {
+        exit_with(format!(
+            "--payload takes <fw_payload.bin> [dtb], got {} argument(s)",
+            args.paths.len()
+        ));
     }
-    if let Some(p) = args.first() {
-        path = p.clone()
-    }
-    let (_stream, stream_handle) = OutputStream::try_default().unwrap();
-    let mut image_file = File::open(&path).unwrap();
-    let mut contents = vec![];
-    image_file.read_to_end(&mut contents).unwrap();
+    let path = args
+        .paths
+        .first()
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
+    //A host audio device is optional: without one the emulator keeps running and the audio
+    //ring simply fills up and drops samples.
+    let audio_output = match OutputStream::try_default() {
+        Ok((stream, stream_handle)) => Some((stream, stream_handle)),
+        Err(err) => {
+            eprintln!("audio: no output stream available ({err}); continuing without sound");
+            None
+        }
+    };
+    let contents = read_or_exit(&path, "image");
 
     let (bus, audio) = MemoryBus::new();
     //Keep a host-side handle after the bus is moved into the MMU.
     let screen_buffer = bus.framebuffer.shared();
-    stream_handle.play_raw(audio.convert_samples()).unwrap();
+    if let Some((_stream, stream_handle)) = &audio_output {
+        if let Err(err) = stream_handle.play_raw(audio.convert_samples::<f32>()) {
+            eprintln!("audio: could not start playback ({err}); continuing without sound");
+        }
+    }
     //Four boot paths: --payload <fw_payload.bin> [dtb] (OpenSBI and the kernel in one blob),
     //<fw_dynamic.bin> <Image> <dtb> (M-mode firmware, boot info record in a2), a flat kernel
     //Image booted in M-mode, or an ELF. The DTB defaults to rv-emu-rs-sv32.dtb when omitted.
-    let emu = if payload {
-        assert!(
-            !contents.starts_with(b"\x7fELF"),
-            "the payload must be a flat binary (fw_payload.bin), not an ELF"
-        );
-        let dtb_path = args.get(1).map(String::as_str).unwrap_or(DEFAULT_DTB);
-        let dtb = std::fs::read(dtb_path)
-            .unwrap_or_else(|err| panic!("could not read the device tree \"{dtb_path}\": {err}"));
+    let emu = if args.payload {
+        if contents.starts_with(b"\x7fELF") {
+            exit_with("the payload must be a flat binary (fw_payload.bin), not an ELF");
+        }
+        let dtb_path = args.paths.get(1).map(String::as_str).unwrap_or(DEFAULT_DTB);
+        let dtb = read_or_exit(dtb_path, "device tree");
         println!("Loading payload \"{path}\" with dtb \"{dtb_path}\"");
         emulator::Emulator::from_payload(contents, dtb, MMU::new(bus))
-    } else if args.len() >= 3 {
-        let kernel_path = &args[1];
-        let dtb_path = &args[2];
-        assert!(
-            !contents.starts_with(b"\x7fELF"),
-            "the firmware must be a flat binary (fw_dynamic.bin), not an ELF"
-        );
-        let kernel = std::fs::read(kernel_path).unwrap_or_else(|err| {
-            panic!("could not read the kernel image \"{kernel_path}\": {err}")
-        });
-        let dtb = std::fs::read(dtb_path)
-            .unwrap_or_else(|err| panic!("could not read the device tree \"{dtb_path}\": {err}"));
+    } else if args.paths.len() == 3 {
+        let kernel_path = &args.paths[1];
+        let dtb_path = &args.paths[2];
+        if contents.starts_with(b"\x7fELF") {
+            exit_with("the firmware must be a flat binary (fw_dynamic.bin), not an ELF");
+        }
+        let kernel = read_or_exit(kernel_path, "kernel image");
+        let dtb = read_or_exit(dtb_path, "device tree");
         println!("Loading firmware \"{path}\", kernel \"{kernel_path}\", dtb \"{dtb_path}\"");
         emulator::Emulator::from_firmware(contents, kernel, dtb, MMU::new(bus))
     } else if contents.starts_with(b"\x7fELF") {
@@ -104,13 +148,20 @@ fn main() {
     } else {
         //A flat kernel Image; the device tree defaults to the one built from rv-emu-rs-sv32.dts.
         let dtb_path = args
+            .paths
             .get(1)
             .cloned()
             .unwrap_or_else(|| DEFAULT_DTB.to_string());
+        let dtb = read_or_exit(&dtb_path, "device tree");
         println!("Loading image \"{path}\" with dtb \"{dtb_path}\"");
-        let dtb = std::fs::read(&dtb_path)
-            .unwrap_or_else(|err| panic!("could not read the device tree \"{dtb_path}\": {err}"));
         emulator::Emulator::from_image(contents, dtb, MMU::new(bus))
+    };
+    let emu = match emu {
+        Ok(emu) => emu,
+        Err(err) => {
+            eprintln!("error: could not boot \"{path}\": {err}");
+            process::exit(1);
+        }
     };
     let stop_emulator = Arc::new(AtomicBool::new(false));
     let emulator_done = Arc::new(AtomicBool::new(false));
@@ -128,7 +179,7 @@ fn main() {
             .expect("could not spawn emulator thread")
     };
 
-    if no_display {
+    if args.no_display {
         println!("Display disabled (--no-display)");
         let _ = emulator_thread.join();
         return;
@@ -157,59 +208,45 @@ fn run_emulator(
     stop: Arc<AtomicBool>,
     instruction_counter: Arc<AtomicU32>,
 ) {
-    let mut stdin = io::stdin();
     println!("Start executing...");
-    let display = false;
-    //Feed stdin into the guest's UART receive buffer while running normally. In display
-    //(single-step) mode stdin is used for stepping instead.
-    let uart_input = if display {
-        None
-    } else {
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let mut stdin = io::stdin();
-            let mut byte = [0u8; 1];
-            loop {
-                match stdin.read(&mut byte) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if tx.send(byte[0]).is_err() {
-                            break;
-                        }
+    //Feed stdin into the guest's UART receive buffer.
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut stdin = io::stdin();
+        let mut byte = [0u8; 1];
+        loop {
+            match stdin.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if tx.send(byte[0]).is_err() {
+                        break;
                     }
-                    Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
                 }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
             }
-        });
-        Some(rx)
-    };
+        }
+    });
+    //Draining in batches keeps stdout locked once per batch and keeps multi-byte UTF-8 written
+    //by the guest intact, instead of printing each byte as a separate char.
+    let mut out = Vec::new();
     //Execute batch of instructions
     const DEVICE_UPDATE_INTERVAL: usize = 1024;
-    let step_batch = if display { 1 } else { DEVICE_UPDATE_INTERVAL };
+    let step_batch = DEVICE_UPDATE_INTERVAL;
     loop {
         if stop.load(Ordering::Acquire) {
             break;
         }
-        //let display = true;
-        let pc = emu.cpu.state.pc;
-        if display {
-            println!("pc: {:0>8x}", pc);
-            let _ = stdin.read(&mut [0u8]).unwrap();
-        }
-        if let Some(input) = &uart_input {
-            while let Ok(byte) = input.try_recv() {
-                emu.cpu.mmu.bus.uart.host_push(byte);
-            }
+        while let Ok(byte) = rx.try_recv() {
+            emu.cpu.mmu.bus.uart.host_push(byte);
         }
         match emu.cpu.handle_interrupt() {
             Err(err) => {
                 println!("Encountered error! {err:?}");
                 break;
             }
-            Ok(false) if emu.cpu.state.wfi => {
-                thread::sleep(Duration::from_micros(10));
-            } // If CPU did not process any interrupts, sleep for in practice minimally possible time to not burn CPU cycles.
+            // If CPU did not process any interrupts, sleep for in practice minimally possible time to not burn CPU cycles.
+            Ok(false) if emu.cpu.state.wfi => thread::sleep(Duration::from_micros(10)),
             Ok(_) => {}
         }
         let mut failed = false;
@@ -231,12 +268,12 @@ fn run_emulator(
             executed += 1;
         }
         instruction_counter.fetch_add(executed, Ordering::Relaxed);
-        let mut wrote = false;
-        while let Some(x) = emu.cpu.mmu.bus.uart.try_get_byte() {
-            print!("{}", x as char);
-            wrote = true;
+        out.clear();
+        while let Some(byte) = emu.cpu.mmu.bus.uart.try_get_byte() {
+            out.push(byte);
         }
-        if wrote {
+        if !out.is_empty() {
+            let _ = io::stdout().write_all(&out);
             let _ = io::stdout().flush();
         }
         //Drain before acting on a fatal error or syscon request so the last output is not lost.
@@ -252,17 +289,12 @@ fn run_emulator(
             break;
         }
     }
-    println!("UART output buffer:");
-    let mut v = vec![];
-    while let Some(x) = emu.cpu.mmu.bus.uart.try_get_byte() {
-        //print!("{}", x as char)
-        v.push(x)
+    //Drain whatever the guest wrote after the last poll so its final output is not lost.
+    let tail: Vec<u8> = std::iter::from_fn(|| emu.cpu.mmu.bus.uart.try_get_byte()).collect();
+    if !tail.is_empty() {
+        let _ = io::stdout().write_all(&tail);
+        let _ = io::stdout().flush();
     }
-
-    for i in v.chunks_exact(2) {
-        println!("Test {}: {}", i[1], i[0] as char)
-    }
-    println!();
 }
 
 #[cfg(test)]
@@ -323,7 +355,7 @@ mod test {
             .unwrap();
 
         let (bus, _audio) = MemoryBus::new();
-        let mut emu = emulator::Emulator::from_elf(elf_contents, MMU::new(bus));
+        let mut emu = emulator::Emulator::from_elf(elf_contents, MMU::new(bus)).unwrap();
         let mut steps = 0;
         while steps < MAX_STEPS {
             if emu.cpu.handle_interrupt().is_err() {

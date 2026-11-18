@@ -7,7 +7,7 @@
 #   doom timedemo [N]  play demoN as fast as possible and print the fps
 #
 # Environment:
-#   DOOM_SOUND=1   drop -nosound (needs a working audio device)
+#   DOOM_SOUND=0   pass -nosound (sound is on by default)
 #
 set -u
 
@@ -62,7 +62,7 @@ elif [ "$mode" = timedemo ]; then
 fi
 
 set -- -width "$WIDTH" -height "$HEIGHT" -vidmode "$VIDMODE" "$@"
-[ "${DOOM_SOUND:-0}" = 1 ] || set -- -nosound "$@"
+[ "${DOOM_SOUND:-1}" = 1 ] || set -- -nosound "$@"
 
 if [ "$mode" != timedemo ]; then
 	exec "$PRBOOM" "$@"

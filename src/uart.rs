@@ -85,27 +85,6 @@ impl UART {
 impl MMdevice for UART {
     const MEMORY_REGION_SIZE: u32 = 0x100;
 
-    fn fetch_halfword(&mut self, _offset: u32) -> Result<u16, TrapType> {
-        Err(TrapType::InstructionAccessFault)
-    }
-    fn read_word_atomically(&mut self, _offset: u32) -> Result<u32, TrapType> {
-        Err(TrapType::LoadAccessFault)
-    }
-    fn write_word_atomically(&mut self, _offset: u32, _word: u32) -> Result<(), TrapType> {
-        Err(TrapType::StoreAccessFault)
-    }
-    fn read_word(&mut self, _offset: u32) -> Result<u32, TrapType> {
-        Err(TrapType::LoadAccessFault)
-    }
-    fn write_word(&mut self, _offset: u32, _word: u32) -> Result<(), TrapType> {
-        Err(TrapType::StoreAccessFault)
-    }
-    fn read_halfword(&mut self, _offset: u32) -> Result<u16, TrapType> {
-        Err(TrapType::LoadAccessFault)
-    }
-    fn write_halfword(&mut self, _offset: u32, _halfword: u16) -> Result<(), TrapType> {
-        Err(TrapType::StoreAccessFault)
-    }
     fn read_byte(&mut self, offset: u32) -> Result<u8, TrapType> {
         let dlab = self.lcr & 0x80 != 0;
         match offset {
