@@ -1,19 +1,24 @@
 /dts-v1/;
 
 /*
- * S-mode device tree for rv-emu-rs: OpenSBI fw_jump + Linux Image.
+ * S-mode device tree for rv-emu-rs, display build: OpenSBI fw_jump + Linux Image.
  *
  * Memory map (src/bus.rs):
- *   0x0c000000  PLIC, 32 device sources; UART is source 10
+ *   0x0c000000  PLIC, 32 device sources; UART is source 10, input is source 11
  *   0x10000000  UART, 16550-compatible registers at offsets 0-7
  *   0x10000200  audio: sample FIFO (0x0) and sample rate (0x4)
+ *   0x10001000  input: goldfish events (keyboard and absolute pointer)
  *   0x11000000  CLINT: msip at 0x0, mtimecmp at 0x4000, mtime at 0xbff8
  *   0x11100000  syscon: poweroff (0x5555) and reboot (0x7777)
  *   0x30000000  framebuffer, 640x480 a8r8g8b8
  *   0x80000000  128 MiB RAM; the emulator places the DTB in the top 16 KiB
  *
  * The PLIC has two contexts, machine and supervisor external, in the order listed by
- * interrupts-extended. Linux uses the supervisor context; the UART is source 10.
+ * interrupts-extended. Linux uses the supervisor context; the UART is source 10 and the
+ * goldfish input device is source 11.
+ *
+ * This is the default when --no-display is not given. tty0 is the preferred
+ * console, so the login shell appears on the emulator's framebuffer window.
  *
  * Build with: dtc -I dts -O dtb -o rv-emu-rs-sv32.dtb rv-emu-rs-sv32.dts
  */
@@ -28,7 +33,13 @@
         #address-cells = <0x02>;
         #size-cells = <0x02>;
         ranges;
-        bootargs = "earlycon=ns16550a,mmio,0x10000000,1000000 console=tty0 console=ttyS0";
+        /*
+         * ttyS0 remains a kernel console, so earlycon and boot messages still
+         * reach the serial port. tty0 is listed last, which makes the
+         * framebuffer VT the preferred console: /dev/console, the init getty
+         * and the login shell land on the screen instead of the UART.
+         */
+        bootargs = "earlycon=ns16550a,mmio,0x10000000,1000000 console=ttyS0 console=tty0";
         stdout-path = "/soc/uart@10000000";
 
         framebuffer@30000000 {
@@ -105,6 +116,13 @@
         audio@10000200 {
             reg = <0x00 0x10000200 0x00 0x08>;
             compatible = "rv-emu-rs,primitive-audio";
+        };
+
+        input@10001000 {
+            reg = <0x00 0x10001000 0x00 0x1000>;
+            compatible = "google,goldfish-events-keypad";
+            interrupt-parent = <&plic>;
+            interrupts = <0x0b>;
         };
 
         clint@11000000 {

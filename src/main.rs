@@ -13,6 +13,7 @@ use std::{
 
 use bus::MemoryBus;
 use clap::Parser;
+use goldfish_events::HostInput;
 use mmu::MMU;
 use rodio::{OutputStream, Source};
 use syscon::SysconEvent;
@@ -26,6 +27,7 @@ pub mod emulator;
 pub mod errors;
 #[cfg(feature = "plus_FD")]
 mod fpu;
+pub mod goldfish_events;
 pub mod manual_debugger;
 pub mod mmdevice;
 pub mod mmu;
@@ -40,9 +42,20 @@ pub mod uart;
 //pub mod gdb;
 
 //The kernel image needs Sv32 and 128 MiB of RAM; the initramfs does not fit in less.
-const DEFAULT_DTB: &str = "rv-emu-rs-sv32.dtb";
+//The display build makes the framebuffer VT the preferred console; the headless build
+//keeps the serial console primary so --no-display still has a login shell.
+const SCREEN_DTB: &str = "rv-emu-rs-sv32.dtb";
+const NO_DISPLAY_DTB: &str = "rv-emu-rs-sv32-nodisplay.dtb";
 //Booted when no image path is passed on the command line.
 const DEFAULT_IMAGE: &str = "./bad_apple/target/riscv32imac-unknown-none-elf/release/bad_apple";
+
+fn default_dtb(no_display: bool) -> &'static str {
+    if no_display {
+        NO_DISPLAY_DTB
+    } else {
+        SCREEN_DTB
+    }
+}
 
 //Command line. Help, version, unknown-option diagnostics and the `--` separator come from
 //clap; the boot mode is picked from the flag, the number of paths and the image contents.
@@ -54,12 +67,15 @@ const DEFAULT_IMAGE: &str = "./bad_apple/target/riscv32imac-unknown-none-elf/rel
     after_help = "\
 Boot modes:
   <image>                  an ELF executable or a flat kernel Image; the device tree
-                           defaults to rv-emu-rs-sv32.dtb
+                           defaults to rv-emu-rs-sv32.dtb, or to
+                           rv-emu-rs-sv32-nodisplay.dtb with --no-display
   <image> <dtb>            flat kernel Image with an explicit device tree
   <fw> <Image> <dtb>       OpenSBI fw_dynamic.bin firmware, kernel Image and device tree
-  --payload <blob> [dtb]   flat OpenSBI fw_payload.bin blob
+  --payload <blob> [dtb]   flat OpenSBI fw_payload.bin blob; the dtb default follows
+                           --no-display as above
 
-Without an image the bad_apple demo build is used."
+Without a dtb, --no-display selects the serial-console device tree; otherwise the
+framebuffer-console one is used. Without an image the bad_apple demo build is used."
 )]
 struct Args {
     /// Treat <image> as a flat OpenSBI fw_payload.bin blob
@@ -129,7 +145,11 @@ fn main() {
         if contents.starts_with(b"\x7fELF") {
             exit_with("the payload must be a flat binary (fw_payload.bin), not an ELF");
         }
-        let dtb_path = args.paths.get(1).map(String::as_str).unwrap_or(DEFAULT_DTB);
+        let dtb_path = args
+            .paths
+            .get(1)
+            .map(String::as_str)
+            .unwrap_or_else(|| default_dtb(args.no_display));
         let dtb = read_or_exit(dtb_path, "device tree");
         println!("Loading payload \"{path}\" with dtb \"{dtb_path}\"");
         emulator::Emulator::from_payload(contents, dtb, MMU::new(bus))
@@ -152,7 +172,7 @@ fn main() {
             .paths
             .get(1)
             .cloned()
-            .unwrap_or_else(|| DEFAULT_DTB.to_string());
+            .unwrap_or_else(|| default_dtb(args.no_display).to_string());
         let dtb = read_or_exit(&dtb_path, "device tree");
         println!("Loading image \"{path}\" with dtb \"{dtb_path}\"");
         emulator::Emulator::from_image(contents, dtb, MMU::new(bus))
@@ -167,6 +187,9 @@ fn main() {
     let stop_emulator = Arc::new(AtomicBool::new(false));
     let emulator_done = Arc::new(AtomicBool::new(false));
     let instruction_counter = Arc::new(AtomicU32::new(0));
+    //Host window input for the goldfish events device. The display thread sends,
+    //the emulator thread drains into the device FIFO.
+    let (input_tx, input_rx) = mpsc::channel();
     let emulator_thread = {
         let stop_emulator = Arc::clone(&stop_emulator);
         let emulator_done = Arc::clone(&emulator_done);
@@ -175,7 +198,7 @@ fn main() {
             .name("emulator".to_string())
             .spawn(move || {
                 let _done = EmulatorDoneGuard(emulator_done);
-                run_emulator(emu, stop_emulator, instruction_counter);
+                run_emulator(emu, stop_emulator, instruction_counter, input_rx);
             })
             .expect("could not spawn emulator thread")
     };
@@ -186,7 +209,7 @@ fn main() {
         return;
     }
 
-    match display::run(screen_buffer, emulator_done, instruction_counter) {
+    match display::run(screen_buffer, emulator_done, instruction_counter, input_tx) {
         display::DisplayExit::WindowClosed => {
             stop_emulator.store(true, Ordering::Release);
         }
@@ -208,6 +231,7 @@ fn run_emulator(
     mut emu: emulator::Emulator,
     stop: Arc<AtomicBool>,
     instruction_counter: Arc<AtomicU32>,
+    input: mpsc::Receiver<HostInput>,
 ) {
     println!("Start executing...");
     //Feed stdin into the guest's UART receive buffer.
@@ -240,6 +264,24 @@ fn run_emulator(
         }
         while let Ok(byte) = rx.try_recv() {
             emu.cpu.mmu.bus.uart.host_push(byte);
+        }
+        //Coalesce pointer motion within one batch: a fast host mouse would
+        //otherwise queue an interrupt for every pixel it crosses. Flush the
+        //pending position before a key so a click sees the motion that led to it.
+        let mut pointer = None;
+        while let Ok(event) = input.try_recv() {
+            match event {
+                HostInput::Key { code, pressed } => {
+                    if let Some((x, y)) = pointer.take() {
+                        emu.cpu.mmu.bus.input.push_pointer(x, y);
+                    }
+                    emu.cpu.mmu.bus.input.push_key(code, pressed);
+                }
+                HostInput::Pointer { x, y } => pointer = Some((x, y)),
+            }
+        }
+        if let Some((x, y)) = pointer {
+            emu.cpu.mmu.bus.input.push_pointer(x, y);
         }
         match emu.cpu.handle_interrupt() {
             Err(err) => {
@@ -306,6 +348,12 @@ mod test {
 
     const MAX_STEPS: usize = 10_000_000;
     const END_MARKER: [u8; 2] = [b'z', 0];
+
+    #[test]
+    fn no_display_selects_the_serial_console_dtb() {
+        assert_eq!(super::default_dtb(false), "rv-emu-rs-sv32.dtb");
+        assert_eq!(super::default_dtb(true), "rv-emu-rs-sv32-nodisplay.dtb");
+    }
 
     fn test_asm_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_asm")

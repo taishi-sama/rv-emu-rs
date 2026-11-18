@@ -1,0 +1,155 @@
+/dts-v1/;
+
+/*
+ * S-mode device tree for rv-emu-rs, headless build: OpenSBI fw_jump + Linux Image.
+ *
+ * Memory map (src/bus.rs):
+ *   0x0c000000  PLIC, 32 device sources; UART is source 10, input is source 11
+ *   0x10000000  UART, 16550-compatible registers at offsets 0-7
+ *   0x10000200  audio: sample FIFO (0x0) and sample rate (0x4)
+ *   0x10001000  input: goldfish events (keyboard and absolute pointer)
+ *   0x11000000  CLINT: msip at 0x0, mtimecmp at 0x4000, mtime at 0xbff8
+ *   0x11100000  syscon: poweroff (0x5555) and reboot (0x7777)
+ *   0x30000000  framebuffer, 640x480 a8r8g8b8
+ *   0x80000000  128 MiB RAM; the emulator places the DTB in the top 16 KiB
+ *
+ * The PLIC has two contexts, machine and supervisor external, in the order listed by
+ * interrupts-extended. Linux uses the supervisor context; the UART is source 10 and the
+ * goldfish input device is source 11.
+ *
+ * This is the default when --no-display is given. ttyS0 is the preferred
+ * console, so the login shell is usable on the serial console.
+ *
+ * Build with: dtc -I dts -O dtb -o rv-emu-rs-sv32-nodisplay.dtb rv-emu-rs-sv32-nodisplay.dts
+ */
+
+/ {
+    #address-cells = <0x02>;
+    #size-cells = <0x02>;
+    compatible = "rv-emu-rs,sv32";
+    model = "rv-emu-rs,rv32imac";
+
+    chosen {
+        #address-cells = <0x02>;
+        #size-cells = <0x02>;
+        ranges;
+        /*
+         * Both ports stay kernel consoles. ttyS0 is listed last, which makes
+         * the serial port the preferred console: /dev/console, the init getty
+         * and the login shell stay on the UART while tty0 keeps the kernel
+         * log and the framebuffer output.
+         */
+        bootargs = "earlycon=ns16550a,mmio,0x10000000,1000000 console=tty0 console=ttyS0";
+        stdout-path = "/soc/uart@10000000";
+
+        framebuffer@30000000 {
+            compatible = "simple-framebuffer";
+            reg = <0x00 0x30000000 0x00 0x12c000>; /* 640*480*4 */
+            width = <640>;
+            height = <480>;
+            stride = <2560>;
+            format = "a8r8g8b8";
+        };
+    };
+
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0x00 0x80000000 0x00 0x8000000>;
+    };
+
+    cpus {
+        #address-cells = <0x01>;
+        #size-cells = <0x00>;
+
+        /* Clint::mtime() counts microseconds */
+        timebase-frequency = <0xf4240>;
+
+        cpu0: cpu@0 {
+            device_type = "cpu";
+            reg = <0x00>;
+            status = "okay";
+            compatible = "riscv";
+            riscv,isa-base = "rv32i";
+            riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei";
+            riscv,isa = "rv32imafdc_zicsr_zifencei";
+            mmu-type = "riscv,sv32";
+
+            cpu_intc: interrupt-controller {
+                #interrupt-cells = <0x01>;
+                interrupt-controller;
+                compatible = "riscv,cpu-intc";
+            };
+        };
+
+        cpu-map {
+            cluster0 {
+                core0 {
+                    cpu = <&cpu0>;
+                };
+            };
+        };
+    };
+
+    soc {
+        #address-cells = <0x02>;
+        #size-cells = <0x02>;
+        compatible = "simple-bus";
+        ranges;
+
+        uart0: uart@10000000 {
+            clock-frequency = <0x1000000>;
+            reg = <0x00 0x10000000 0x00 0x100>;
+            compatible = "ns16550a";
+            interrupt-parent = <&plic>;
+            interrupts = <0x0a>;
+        };
+
+        plic: interrupt-controller@c000000 {
+            reg = <0x00 0x0c000000 0x00 0x04000000>;
+            compatible = "sifive,plic-1.0.0", "riscv,plic0";
+            #interrupt-cells = <0x01>;
+            interrupt-controller;
+            riscv,ndev = <0x20>;
+            interrupts-extended = <&cpu_intc 0x0b>, <&cpu_intc 0x09>;
+        };
+
+        audio@10000200 {
+            reg = <0x00 0x10000200 0x00 0x08>;
+            compatible = "rv-emu-rs,primitive-audio";
+        };
+
+        input@10001000 {
+            reg = <0x00 0x10001000 0x00 0x1000>;
+            compatible = "google,goldfish-events-keypad";
+            interrupt-parent = <&plic>;
+            interrupts = <0x0b>;
+        };
+
+        clint@11000000 {
+            interrupts-extended = <&cpu_intc 0x03 &cpu_intc 0x07>;
+            reg = <0x00 0x11000000 0x00 0x10000>;
+            compatible = "sifive,clint0", "riscv,clint0";
+        };
+
+        syscon0: syscon@11100000 {
+            reg = <0x00 0x11100000 0x00 0x1000>;
+            compatible = "syscon";
+        };
+
+    };
+
+    poweroff {
+        value = <0x5555>;
+        offset = <0x00>;
+        regmap = <&syscon0>;
+        compatible = "syscon-poweroff";
+    };
+
+    reboot {
+        value = <0x7777>;
+        offset = <0x00>;
+        regmap = <&syscon0>;
+        compatible = "syscon-reboot";
+    };
+
+};

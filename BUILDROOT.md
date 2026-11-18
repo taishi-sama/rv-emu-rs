@@ -75,7 +75,7 @@ Everything board-specific lives in this directory, which is used as a Buildroot
 | `buildroot/external.desc` | br2-external tree name, `RVEMURS` |
 | `buildroot/configs/rv-emu-rs_defconfig` | the complete board configuration |
 | `buildroot/board/rv-emu-rs/32-bit.config` | copy of the kernel's 32-bit fragment |
-| `buildroot/board/rv-emu-rs/linux.fragment` | board kernel options (simplefb, logo, ALSA) |
+| `buildroot/board/rv-emu-rs/linux.fragment` | board kernel options (simplefb, logo, ALSA, goldfish input) |
 | `buildroot/package/primitive-audio/` | out-of-tree ALSA driver for the audio device |
 | `buildroot/board/rv-emu-rs/rootfs-overlay/` | `/root/doom`, demo scripts, prboom config, WAD |
 
@@ -141,6 +141,10 @@ CONFIG_FB_SIMPLE=y
 CONFIG_LOGO=y
 CONFIG_LOGO_LINUX_CLUT224=y
 CONFIG_SND=y
+CONFIG_GOLDFISH=y
+CONFIG_KEYBOARD_GOLDFISH_EVENTS=y
+CONFIG_INPUT_MOUSEDEV_SCREEN_X=640
+CONFIG_INPUT_MOUSEDEV_SCREEN_Y=480
 # CONFIG_GCC_PLUGINS is not set
 ```
 
@@ -193,6 +197,50 @@ is enabled.
 The `doom` script enables sound by default; `DOOM_SOUND=0 ./doom` passes
 `-nosound` (for example when the host has no audio device).
 
+### Input
+
+The emulator exposes one Goldfish events device at `0x10001000` (PLIC source
+11), compatible with Linux's `google,goldfish-events-keypad` driver. The host
+window forwards physical key presses and pointer motion into it; the kernel
+builds a single evdev `input_dev` with ordinary `KEY_*` codes, the usual mouse
+buttons and absolute `ABS_X`/`ABS_Y` axes.
+
+The pointer is absolute: `ABS_X`/`ABS_Y` are framebuffer pixel coordinates, so
+the guest pointer follows the host cursor without a grab or relative drift.
+SDL 1.2's fbcon backend reads `/dev/input/mice`, which is served by `mousedev`;
+its absolute-device path converts the coordinates into the relative packets
+SDL expects. `CONFIG_INPUT_MOUSEDEV_SCREEN_X/Y` are set to 640x480 so that
+conversion is 1:1 with the framebuffer.
+
+Because the goldfish driver syncs after every three-word event, mousedev sees
+`ABS_X` and `ABS_Y` in separate reports. Its clients start at the screen centre,
+so the first report after a client opens can contain a one-time correction from
+the centre; vanilla Doom only uses the X axis, so this does not affect turning.
+
+Keyboard and mouse-button events are only delivered while the window has
+keyboard focus. Pointer motion is taken whenever the cursor is over the window.
+Losing focus releases all held keys and buttons so Doom does not keep moving or
+firing.
+
+Mouse buttons share the input device with the keyboard, so Linux's VT keyboard
+handler also receives them. In `K_MEDIUMRAW` (which SDL uses) they appear as
+extended scancode bytes, which SDL parses as a few spurious key releases. Doom
+ignores those; a split keyboard/pointer device would be needed to remove them
+entirely.
+
+The `linux.fragment` additions are:
+
+```
+CONFIG_GOLDFISH=y
+CONFIG_KEYBOARD_GOLDFISH_EVENTS=y
+CONFIG_INPUT_MOUSEDEV_SCREEN_X=640
+CONFIG_INPUT_MOUSEDEV_SCREEN_Y=480
+```
+
+The fragment sets `CONFIG_GOLDFISH=y` explicitly; the generic RISC-V defconfig
+also selects it through `ARCH_VIRT`. `CONFIG_INPUT_EVDEV` and
+`CONFIG_INPUT_MOUSEDEV` come from the generic RISC-V defconfig.
+
 ### Boot image
 
 | Option | Why |
@@ -210,6 +258,12 @@ needed.
 
 ## Notes
 
+- Two device trees are provided. `rv-emu-rs-sv32.dts` lists `tty0` last, so the
+  framebuffer VT is the preferred console and the login shell appears on the
+  emulator window; it is selected when `--no-display` is not given.
+  `rv-emu-rs-sv32-nodisplay.dts` lists `ttyS0` last, so `--no-display` keeps the
+  serial console as the login shell. Both register both ports, so kernel and
+  `earlycon` messages reach the UART either way.
 - If the Buildroot checkout has no `dl/` directory, symlink a previous checkout's
   `dl/` into it to reuse the download cache, or let Buildroot populate it.
 - Host QEMU (`BR2_PACKAGE_HOST_QEMU`) is not enabled: it only builds a host tool

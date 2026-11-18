@@ -5,7 +5,7 @@ My small personal project targeted to write RISC-V emulator with decent accuracy
 
 Current target instruction set is rv32imafdc, with Sv32 virtual memory and user mode - essentially full RV32GC.
 
-Devices list contains a 16550-compatible UART, a stereo 16-bit audio device with a programmable sample rate, a simple 640x480 framebuffer, a PLIC, a CLINT and a syscon. Will be extended in the future.
+Devices list contains a 16550-compatible UART, a stereo 16-bit audio device with a programmable sample rate, a simple 640x480 framebuffer, a Goldfish events keyboard/absolute-pointer input device, a PLIC, a CLINT and a syscon. Will be extended in the future.
 
 # DOOM SHOWCASE
 https://github.com/user-attachments/assets/0e2e8eab-3d41-4dde-a272-1f81b0bc895d
@@ -30,7 +30,8 @@ then run it
 cargo run --profile maxspeed -- --payload images/fw_payload.bin
 ```
 
-And use inside serial terminal either
+And log in on the emulator window (the framebuffer VT is the preferred console),
+then run either
 
 ```sh
 ./doom_demo.sh
@@ -45,6 +46,10 @@ or
 coremark
 ```
 
+The serial port receives kernel and `earlycon` messages in both cases; the
+preferred console (and therefore the login shell) follows the selected device
+tree. `--no-display` selects the serial-console variant automatically.
+
 Full instruction how to build buildroot from scratch is described in [BUILDROOT.md](./BUILDROOT.md)
 Essentially just run download buildroot, (optionally) download doom1.wad for PRBOOM that runs inside emulator, place according instruction, run described commands.
 
@@ -54,9 +59,13 @@ Essentially just run download buildroot, (optionally) download doom1.wad for PRB
 cargo run --profile maxspeed -- --payload images/fw_payload.bin
 ```
 
-`rv-emu-rs --help` lists the boot modes and options. `--no-display` boots headless with the
-serial console on stdio and no framebuffer window. Audio is optional: on hosts without a sound
-device the emulator keeps running and silently drops samples.
+`rv-emu-rs --help` lists the boot modes and options. Without an explicit DTB the emulator
+uses `rv-emu-rs-sv32.dtb`, which makes the framebuffer VT the login console. With
+`--no-display` it uses `rv-emu-rs-sv32-nodisplay.dtb`, which keeps the serial console as the
+login shell, so headless boots remain interactive. Audio is optional: on hosts without a
+sound device the emulator keeps running and silently drops samples. The window forwards the
+host keyboard and an absolute pointer to the guest; keyboard and button events are active
+while the window has focus.
 
 The F and D extensions are built in by default; a strict RV32IMAC build without them is
 `cargo run --no-default-features`.
@@ -64,11 +73,12 @@ The F and D extensions are built in by default; a strict RV32IMAC build without 
 # Developing
 
 Running the test suite requires a `riscv32-elf` binutils toolchain (`riscv32-elf-as`,
-`riscv32-elf-ld`) for the assembly arch tests, and `dtc` to rebuild the device tree from
-`rv-emu-rs-sv32.dts`:
+`riscv32-elf-ld`) for the assembly arch tests, and `dtc` to rebuild the device trees:
 
 ```sh
 cargo test
+dtc -I dts -O dtb -o rv-emu-rs-sv32.dtb rv-emu-rs-sv32.dts
+dtc -I dts -O dtb -o rv-emu-rs-sv32-nodisplay.dtb rv-emu-rs-sv32-nodisplay.dts
 ```
 
 # Credits 

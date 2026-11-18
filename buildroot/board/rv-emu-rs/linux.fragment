@@ -15,3 +15,12 @@ CONFIG_LOGO_LINUX_CLUT224=y
 # ALSA core for the primitive audio driver. SND_PCM itself is promptless and
 # comes from the defconfig's SND_SOC=y.
 CONFIG_SND=y
+
+# Goldfish events input device: one evdev node for the host keyboard and the
+# absolute pointer. CONFIG_GOLDFISH is already selected by the RISC-V Goldfish
+# SOC support.
+CONFIG_KEYBOARD_GOLDFISH_EVENTS=y
+# mousedev turns the absolute axes into the relative packets SDL 1.2 reads
+# from /dev/input/mice; match its virtual screen to the 640x480 framebuffer.
+CONFIG_INPUT_MOUSEDEV_SCREEN_X=640
+CONFIG_INPUT_MOUSEDEV_SCREEN_Y=480

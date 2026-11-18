@@ -6,22 +6,28 @@
 //! window.
 
 use std::{
+    collections::HashSet,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, Ordering},
+        mpsc::Sender,
     },
     time::{Duration, Instant},
 };
 
 use winit::{
     application::ApplicationHandler,
-    dpi::LogicalSize,
-    event::WindowEvent,
+    dpi::{LogicalSize, PhysicalPosition},
+    event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
+    keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
 
-use crate::simple_framebuffer::SharedScreenBuffer;
+use crate::{
+    goldfish_events::{BTN_EXTRA, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, BTN_SIDE, HostInput},
+    simple_framebuffer::SharedScreenBuffer,
+};
 
 //15 Hz.
 const REFRESH_INTERVAL: Duration = Duration::from_micros(1_000_000 / 15);
@@ -40,6 +46,7 @@ pub fn run(
     screen: Arc<SharedScreenBuffer>,
     emulator_done: Arc<AtomicBool>,
     instruction_counter: Arc<AtomicU32>,
+    input: Sender<HostInput>,
 ) -> DisplayExit {
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
@@ -56,6 +63,8 @@ pub fn run(
         instruction_counter,
         last_rate_update: Instant::now(),
         exit_reason: None,
+        input,
+        pressed_keys: HashSet::new(),
     };
     if let Err(err) = event_loop.run_app(&mut app) {
         eprintln!("display: event loop failed: {err}");
@@ -71,6 +80,10 @@ struct DisplayApp {
     instruction_counter: Arc<AtomicU32>,
     last_rate_update: Instant,
     exit_reason: Option<DisplayExit>,
+    input: Sender<HostInput>,
+    //Keys currently held so a focus loss can release them; a stuck key would
+    //keep Doom moving or firing after the window loses focus.
+    pressed_keys: HashSet<u16>,
 }
 
 impl ApplicationHandler for DisplayApp {
@@ -126,6 +139,54 @@ impl ApplicationHandler for DisplayApp {
                 self.exit_reason = Some(DisplayExit::WindowClosed);
                 event_loop.exit();
             }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.repeat {
+                    return;
+                }
+                let PhysicalKey::Code(code) = event.physical_key else {
+                    return;
+                };
+                let Some(code) = linux_keycode(code) else {
+                    return;
+                };
+                self.set_key(code, event.state == ElementState::Pressed);
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let Some(code) = mouse_button_code(button) else {
+                    return;
+                };
+                self.set_key(code, state == ElementState::Pressed);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(state) = &self.state {
+                    if let Some((x, y)) = framebuffer_position(state, position) {
+                        let _ = self.input.send(HostInput::Pointer { x, y });
+                    }
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                //A button released outside the window may never produce a
+                //MouseInput event without a pointer grab. Release held pointer
+                //buttons but leave keyboard keys alone.
+                let buttons: Vec<u16> = self
+                    .pressed_keys
+                    .iter()
+                    .copied()
+                    .filter(|&code| code >= BTN_LEFT)
+                    .collect();
+                for code in buttons {
+                    self.set_key(code, false);
+                }
+            }
+            WindowEvent::Focused(false) => {
+                let pressed: Vec<u16> = self.pressed_keys.drain().collect();
+                for code in pressed {
+                    let _ = self.input.send(HostInput::Key {
+                        code,
+                        pressed: false,
+                    });
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     state.resize(size.width, size.height);
@@ -174,6 +235,165 @@ impl ApplicationHandler for DisplayApp {
     }
 }
 
+impl DisplayApp {
+    fn set_key(&mut self, code: u16, pressed: bool) {
+        if pressed {
+            self.pressed_keys.insert(code);
+        } else {
+            self.pressed_keys.remove(&code);
+        }
+        let _ = self.input.send(HostInput::Key { code, pressed });
+    }
+}
+
+//Maps a host cursor position, in window pixels, onto the guest framebuffer.
+//The display stretches the framebuffer to the whole window, so this is a plain
+//scale rather than a letterbox calculation.
+fn framebuffer_position(state: &GfxState, position: PhysicalPosition<f64>) -> Option<(u16, u16)> {
+    if !position.x.is_finite() || !position.y.is_finite() {
+        return None;
+    }
+    let size = state.window.inner_size();
+    if size.width == 0 || size.height == 0 {
+        return None;
+    }
+    let params = state.screen.params();
+    let x = (position.x.clamp(0.0, f64::from(size.width)) / f64::from(size.width)
+        * f64::from(params.width)) as u32;
+    let y = (position.y.clamp(0.0, f64::from(size.height)) / f64::from(size.height)
+        * f64::from(params.height)) as u32;
+    Some((
+        x.min(params.width - 1) as u16,
+        y.min(params.height - 1) as u16,
+    ))
+}
+
+fn mouse_button_code(button: MouseButton) -> Option<u16> {
+    match button {
+        MouseButton::Left => Some(BTN_LEFT),
+        MouseButton::Right => Some(BTN_RIGHT),
+        MouseButton::Middle => Some(BTN_MIDDLE),
+        MouseButton::Back => Some(BTN_SIDE),
+        MouseButton::Forward => Some(BTN_EXTRA),
+        _ => None,
+    }
+}
+
+//Physical key codes make the mapping independent of the host keyboard layout,
+//which is what Doom's default WASD/arrow bindings expect. Codes are Linux
+//KEY_* values from input-event-codes.h.
+fn linux_keycode(code: KeyCode) -> Option<u16> {
+    use KeyCode::*;
+    Some(match code {
+        Escape => 1,
+        Digit1 => 2,
+        Digit2 => 3,
+        Digit3 => 4,
+        Digit4 => 5,
+        Digit5 => 6,
+        Digit6 => 7,
+        Digit7 => 8,
+        Digit8 => 9,
+        Digit9 => 10,
+        Digit0 => 11,
+        Minus => 12,
+        Equal => 13,
+        Backspace => 14,
+        Tab => 15,
+        KeyQ => 16,
+        KeyW => 17,
+        KeyE => 18,
+        KeyR => 19,
+        KeyT => 20,
+        KeyY => 21,
+        KeyU => 22,
+        KeyI => 23,
+        KeyO => 24,
+        KeyP => 25,
+        BracketLeft => 26,
+        BracketRight => 27,
+        Enter => 28,
+        ControlLeft => 29,
+        KeyA => 30,
+        KeyS => 31,
+        KeyD => 32,
+        KeyF => 33,
+        KeyG => 34,
+        KeyH => 35,
+        KeyJ => 36,
+        KeyK => 37,
+        KeyL => 38,
+        Semicolon => 39,
+        Quote => 40,
+        Backquote => 41,
+        ShiftLeft => 42,
+        Backslash => 43,
+        KeyZ => 44,
+        KeyX => 45,
+        KeyC => 46,
+        KeyV => 47,
+        KeyB => 48,
+        KeyN => 49,
+        KeyM => 50,
+        Comma => 51,
+        Period => 52,
+        Slash => 53,
+        ShiftRight => 54,
+        NumpadMultiply => 55,
+        AltLeft => 56,
+        Space => 57,
+        CapsLock => 58,
+        F1 => 59,
+        F2 => 60,
+        F3 => 61,
+        F4 => 62,
+        F5 => 63,
+        F6 => 64,
+        F7 => 65,
+        F8 => 66,
+        F9 => 67,
+        F10 => 68,
+        NumLock => 69,
+        ScrollLock => 70,
+        Numpad7 => 71,
+        Numpad8 => 72,
+        Numpad9 => 73,
+        NumpadSubtract => 74,
+        Numpad4 => 75,
+        Numpad5 => 76,
+        Numpad6 => 77,
+        NumpadAdd => 78,
+        Numpad1 => 79,
+        Numpad2 => 80,
+        Numpad3 => 81,
+        Numpad0 => 82,
+        NumpadDecimal => 83,
+        IntlBackslash => 86,
+        F11 => 87,
+        F12 => 88,
+        NumpadEnter => 96,
+        ControlRight => 97,
+        NumpadDivide => 98,
+        PrintScreen => 99,
+        AltRight => 100,
+        Home => 102,
+        ArrowUp => 103,
+        PageUp => 104,
+        ArrowLeft => 105,
+        ArrowRight => 106,
+        End => 107,
+        ArrowDown => 108,
+        PageDown => 109,
+        Insert => 110,
+        Delete => 111,
+        Pause => 119,
+        SuperLeft => 125,
+        SuperRight => 126,
+        ContextMenu => 127,
+        _ => return None,
+    })
+}
+
 fn humanize_rate(rate: u64) -> String {
     if rate >= 1_000_000 {
         format!("{:.2} MIPS", rate as f64 / 1_000_000.0)
@@ -219,6 +439,11 @@ impl GfxState {
             ..Default::default()
         }))
         .map_err(|err| format!("could not find a GPU adapter: {err}"))?;
+        let adapter_info = adapter.get_info();
+        eprintln!(
+            "display: using {} ({:?})",
+            adapter_info.name, adapter_info.backend
+        );
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("rv-emu-rs display"),
             ..Default::default()
@@ -465,5 +690,19 @@ mod tests {
         assert_eq!(humanize_rate(12_345), "12.35 KIPS");
         assert_eq!(humanize_rate(1_234_567), "1.23 MIPS");
         assert_eq!(humanize_rate(12_345_678), "12.35 MIPS");
+    }
+
+    #[test]
+    fn maps_doom_keys_to_linux_codes() {
+        use winit::keyboard::KeyCode;
+
+        assert_eq!(super::linux_keycode(KeyCode::KeyW), Some(17));
+        assert_eq!(super::linux_keycode(KeyCode::KeyA), Some(30));
+        assert_eq!(super::linux_keycode(KeyCode::Space), Some(57));
+        assert_eq!(super::linux_keycode(KeyCode::ControlLeft), Some(29));
+        assert_eq!(super::linux_keycode(KeyCode::ShiftRight), Some(54));
+        assert_eq!(super::linux_keycode(KeyCode::ArrowUp), Some(103));
+        assert_eq!(super::linux_keycode(KeyCode::F12), Some(88));
+        assert_eq!(super::linux_keycode(KeyCode::F13), None);
     }
 }

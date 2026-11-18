@@ -1,5 +1,6 @@
 use crate::{
     clint::Clint,
+    goldfish_events::{self, GoldfishEvents},
     mmdevice::MMdevice,
     plic::{InterruptSource, Plic, PlicContext},
     primitive_audio::{self, PrimitiveAudioProducer, PrimitiveAudioReceiver},
@@ -15,12 +16,13 @@ pub const RAM_ADDRESS: u32 = 0x80000000;
 pub const PLIC_ADDRESS: u32 = 0x0c000000;
 pub const UART_ADDRESS: u32 = 0x10000000;
 pub const PRIMITIVE_AUDIO_ADDRESS: u32 = 0x10000200;
+pub const GOLDFISH_EVENTS_ADDRESS: u32 = 0x10001000;
 pub const CLINT_ADDRESS: u32 = 0x11000000;
 pub const SYSCON_ADDRESS: u32 = 0x11100000;
 pub const FRAMEBUFFER_ADDRESS: u32 = 0x30000000;
 
 //The PLIC has 32 device sources plus the reserved source 0, matching riscv,ndev = <0x20> in
-//the device tree. Source 10 is the UART.
+//the device tree. Source 10 is the UART and source 11 is the goldfish input device.
 const PLIC_SOURCES: u32 = 33;
 
 //Range patterns need a single constant bound, so each device's exclusive region end is named here.
@@ -28,6 +30,7 @@ const RAM_END: u32 = RAM_ADDRESS + RAM::MEMORY_REGION_SIZE;
 const PLIC_END: u32 = PLIC_ADDRESS + Plic::MEMORY_REGION_SIZE;
 const UART_END: u32 = UART_ADDRESS + UART::MEMORY_REGION_SIZE;
 const AUDIO_END: u32 = PRIMITIVE_AUDIO_ADDRESS + PrimitiveAudioReceiver::MEMORY_REGION_SIZE;
+const GOLDFISH_EVENTS_END: u32 = GOLDFISH_EVENTS_ADDRESS + GoldfishEvents::MEMORY_REGION_SIZE;
 const CLINT_END: u32 = CLINT_ADDRESS + Clint::MEMORY_REGION_SIZE;
 const SYSCON_END: u32 = SYSCON_ADDRESS + Syscon::MEMORY_REGION_SIZE;
 const FRAMEBUFFER_END: u32 = FRAMEBUFFER_ADDRESS + SimpleScreenbuffer::MEMORY_REGION_SIZE;
@@ -61,6 +64,7 @@ pub struct MemoryBus {
     pub plic: Plic,
     pub uart: UART,
     pub audio: PrimitiveAudioReceiver,
+    pub input: GoldfishEvents,
     pub framebuffer: SimpleScreenbuffer,
     pub clint: Clint,
     pub syscon: Syscon,
@@ -73,12 +77,16 @@ impl MemoryBus {
         let uart_irq = plic
             .register_source(uart::IRQ)
             .expect("UART PLIC source must be available");
+        let input_irq = plic
+            .register_source(goldfish_events::IRQ)
+            .expect("input PLIC source must be available");
         (
             MemoryBus {
                 ram: RAM::new(),
                 plic,
                 uart: UART::new(uart_irq),
                 audio: audio_res,
+                input: GoldfishEvents::new(input_irq),
                 framebuffer: SimpleScreenbuffer::new(),
                 clint: Clint::new(),
                 syscon: Syscon::new(),
@@ -90,8 +98,11 @@ impl MemoryBus {
     //external-interrupt lines; devices never claim or complete interrupts themselves.
     #[inline]
     pub fn poll_irq_lines(&mut self) {
-        let MemoryBus { plic, uart, .. } = self;
+        let MemoryBus {
+            plic, uart, input, ..
+        } = self;
         uart.poll_irqs(plic);
+        input.poll_irqs(plic);
     }
     #[inline]
     pub fn external_interrupt_pending(&self, context: PlicContext) -> bool {
@@ -194,6 +205,9 @@ impl MemoryBus {
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => {
                 self.audio.read_word(address - PRIMITIVE_AUDIO_ADDRESS)
             }
+            GOLDFISH_EVENTS_ADDRESS..GOLDFISH_EVENTS_END => {
+                self.input.read_word(address - GOLDFISH_EVENTS_ADDRESS)
+            }
             FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => {
                 self.framebuffer.read_word(address - FRAMEBUFFER_ADDRESS)
             }
@@ -226,6 +240,9 @@ impl MemoryBus {
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => {
                 self.audio.read_byte(address - PRIMITIVE_AUDIO_ADDRESS)
             }
+            GOLDFISH_EVENTS_ADDRESS..GOLDFISH_EVENTS_END => {
+                self.input.read_byte(address - GOLDFISH_EVENTS_ADDRESS)
+            }
             FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => {
                 self.framebuffer.read_byte(address - FRAMEBUFFER_ADDRESS)
             }
@@ -243,6 +260,9 @@ impl MemoryBus {
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => self
                 .audio
                 .write_word(address - PRIMITIVE_AUDIO_ADDRESS, word),
+            GOLDFISH_EVENTS_ADDRESS..GOLDFISH_EVENTS_END => self
+                .input
+                .write_word(address - GOLDFISH_EVENTS_ADDRESS, word),
             FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => self
                 .framebuffer
                 .write_word(address - FRAMEBUFFER_ADDRESS, word),
@@ -255,9 +275,11 @@ impl MemoryBus {
     //64-bit accesses are used by FLD/FSD. They are decomposed into two word accesses, but both
     //words are range-checked first so a bad second word cannot leave a partial store behind.
     pub fn read_dword(&mut self, address: u32) -> Result<u64, Trap> {
-        //The PLIC is a 32-bit register window; a 64-bit read would also trigger a claim side
-        //effect on the second word.
-        if (PLIC_ADDRESS..PLIC_END).contains(&address) {
+        //The PLIC and the input FIFO are 32-bit register windows; a 64-bit read
+        //would trigger a claim or pop two event words on the second access.
+        if (PLIC_ADDRESS..PLIC_END).contains(&address)
+            || (GOLDFISH_EVENTS_ADDRESS..GOLDFISH_EVENTS_END).contains(&address)
+        {
             return Err(Trap {
                 tcause: TrapType::LoadAccessFault,
                 tval: address,
@@ -268,6 +290,9 @@ impl MemoryBus {
         Ok(low as u64 | ((high as u64) << 32))
     }
     pub fn check_write_dword(&self, address: u32) -> Result<(), Trap> {
+        //The input region is deliberately absent: a 64-bit store would split
+        //into a page-select write followed by a fault, so reject it before the
+        //first word takes effect.
         let regions = [
             (RAM_ADDRESS, RAM_END),
             (UART_ADDRESS, UART_END),
@@ -328,6 +353,9 @@ impl MemoryBus {
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => self
                 .audio
                 .write_byte(address - PRIMITIVE_AUDIO_ADDRESS, byte),
+            GOLDFISH_EVENTS_ADDRESS..GOLDFISH_EVENTS_END => self
+                .input
+                .write_byte(address - GOLDFISH_EVENTS_ADDRESS, byte),
             FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => self
                 .framebuffer
                 .write_byte(address - FRAMEBUFFER_ADDRESS, byte),
