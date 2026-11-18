@@ -1,4 +1,4 @@
-use rb::{RbConsumer, RbInspector, RbProducer, RB};
+use rb::{RB, RbConsumer, RbInspector, RbProducer};
 use rodio::Source;
 
 use crate::{mmdevice::MMdevice, traps::TrapType};

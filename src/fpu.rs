@@ -8,7 +8,7 @@
 //! properly boxed yields the canonical NaN, as required by the F extension.
 
 use softfloat_pure::softfloat::{defaultNaNF32UI, softfloat_flag_invalid};
-use softfloat_pure::{float32_t, float64_t, ExceptionFlags, Float, RoundingMode, FPU};
+use softfloat_pure::{ExceptionFlags, FPU, Float, RoundingMode, float32_t, float64_t};
 
 use crate::{
     cpu::{CPU, MSTATUS_FS},
@@ -747,11 +747,7 @@ fn classify_f32(bits: u32) -> u32 {
     let fraction = bits & 0x7f_ffff;
     if exponent == 0xff {
         if fraction == 0 {
-            if negative {
-                1 << 0
-            } else {
-                1 << 7
-            }
+            if negative { 1 << 0 } else { 1 << 7 }
         } else if fraction & 0x40_0000 == 0 {
             1 << 8
         } else {
@@ -759,11 +755,7 @@ fn classify_f32(bits: u32) -> u32 {
         }
     } else if exponent == 0 {
         if fraction == 0 {
-            if negative {
-                1 << 3
-            } else {
-                1 << 4
-            }
+            if negative { 1 << 3 } else { 1 << 4 }
         } else if negative {
             1 << 2
         } else {
@@ -782,11 +774,7 @@ fn classify_f64(bits: u64) -> u32 {
     let fraction = bits & 0xf_ffff_ffff_ffff;
     if exponent == 0x7ff {
         if fraction == 0 {
-            if negative {
-                1 << 0
-            } else {
-                1 << 7
-            }
+            if negative { 1 << 0 } else { 1 << 7 }
         } else if fraction & 0x8_0000_0000_0000 == 0 {
             1 << 8
         } else {
@@ -794,11 +782,7 @@ fn classify_f64(bits: u64) -> u32 {
         }
     } else if exponent == 0 {
         if fraction == 0 {
-            if negative {
-                1 << 3
-            } else {
-                1 << 4
-            }
+            if negative { 1 << 3 } else { 1 << 4 }
         } else if negative {
             1 << 2
         } else {

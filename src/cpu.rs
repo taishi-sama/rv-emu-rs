@@ -1,4 +1,4 @@
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 
 #[cfg(feature = "plus_FD")]
 use crate::fpu::FpuState;
@@ -248,7 +248,8 @@ impl CPU {
     //Sample the interrupt sources, split them by delegation, wake WFI, and take the
     //highest-priority interrupt that is enabled for the current privilege. External-controller
     //interrupts plug in through MMU::meip.
-    pub fn handle_interrupt(&mut self) -> Result<(), EmulatorError> {
+    /// Return Ok(true) if function handled interrupt, Ok(false) otherwise.
+    pub fn handle_interrupt(&mut self) -> Result<bool, EmulatorError> {
         self.state.resample_interrupts = false;
         let pending = Self::pending_mip(&self.state, &mut self.mmu);
         let machine = self.state.mie & pending & IMPLEMENTED_INTERRUPT_MASK & !self.state.mideleg;
@@ -275,24 +276,28 @@ impl CPU {
         if machine_enabled {
             for (bit, cause) in INTERRUPT_PRIORITY {
                 if machine & bit != 0 {
-                    return self.process_trap(Trap {
-                        tcause: cause,
-                        tval: 0,
-                    });
+                    return self
+                        .process_trap(Trap {
+                            tcause: cause,
+                            tval: 0,
+                        })
+                        .map(|()| true);
                 }
             }
         }
         if supervisor_enabled {
             for (bit, cause) in INTERRUPT_PRIORITY {
                 if supervisor & bit != 0 {
-                    return self.process_trap(Trap {
-                        tcause: cause,
-                        tval: 0,
-                    });
+                    return self
+                        .process_trap(Trap {
+                            tcause: cause,
+                            tval: 0,
+                        })
+                        .map(|()| true);
                 }
             }
         }
-        Ok(())
+        Ok(false)
     }
     // Fetch the first 16 bits, then if the instruction is not compressed fetch the remaining 16 bits.
     fn fetch(&mut self) -> Result<u32, Trap> {

@@ -3,10 +3,12 @@ use std::{
     fs::File,
     io::{self, Read, Write},
     sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        mpsc,
     },
     thread,
+    time::Duration,
 };
 
 use bus::MemoryBus;
@@ -112,14 +114,16 @@ fn main() {
     };
     let stop_emulator = Arc::new(AtomicBool::new(false));
     let emulator_done = Arc::new(AtomicBool::new(false));
+    let instruction_counter = Arc::new(AtomicU32::new(0));
     let emulator_thread = {
         let stop_emulator = Arc::clone(&stop_emulator);
         let emulator_done = Arc::clone(&emulator_done);
+        let instruction_counter = Arc::clone(&instruction_counter);
         thread::Builder::new()
             .name("emulator".to_string())
             .spawn(move || {
                 let _done = EmulatorDoneGuard(emulator_done);
-                run_emulator(emu, stop_emulator);
+                run_emulator(emu, stop_emulator, instruction_counter);
             })
             .expect("could not spawn emulator thread")
     };
@@ -130,7 +134,7 @@ fn main() {
         return;
     }
 
-    match display::run(screen_buffer, emulator_done) {
+    match display::run(screen_buffer, emulator_done, instruction_counter) {
         display::DisplayExit::WindowClosed => {
             stop_emulator.store(true, Ordering::Release);
         }
@@ -148,7 +152,11 @@ impl Drop for EmulatorDoneGuard {
     }
 }
 
-fn run_emulator(mut emu: emulator::Emulator, stop: Arc<AtomicBool>) {
+fn run_emulator(
+    mut emu: emulator::Emulator,
+    stop: Arc<AtomicBool>,
+    instruction_counter: Arc<AtomicU32>,
+) {
     let mut stdin = io::stdin();
     println!("Start executing...");
     let display = false;
@@ -194,11 +202,18 @@ fn run_emulator(mut emu: emulator::Emulator, stop: Arc<AtomicBool>) {
                 emu.cpu.mmu.bus.uart.host_push(byte);
             }
         }
-        if let Err(err) = emu.cpu.handle_interrupt() {
-            println!("Encountered error! {err:?}");
-            break;
+        match emu.cpu.handle_interrupt() {
+            Err(err) => {
+                println!("Encountered error! {err:?}");
+                break;
+            }
+            Ok(false) if emu.cpu.state.wfi => {
+                thread::sleep(Duration::from_micros(10));
+            } // If CPU did not process any interrupts, sleep for in practice minimally possible time to not burn CPU cycles.
+            Ok(_) => {}
         }
         let mut failed = false;
+        let mut executed = 0u32;
         for _ in 0..step_batch {
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -213,7 +228,9 @@ fn run_emulator(mut emu: emulator::Emulator, stop: Arc<AtomicBool>) {
                 failed = true;
                 break;
             }
+            executed += 1;
         }
+        instruction_counter.fetch_add(executed, Ordering::Relaxed);
         let mut wrote = false;
         while let Some(x) = emu.cpu.mmu.bus.uart.try_get_byte() {
             print!("{}", x as char);

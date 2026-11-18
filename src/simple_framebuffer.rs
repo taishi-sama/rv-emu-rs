@@ -4,8 +4,8 @@
 //! Primary way to fetch row in general is through `ScreenBufferRow::content`, updated row is through `ScreenBufferRow::take_if_dirty`(automatically clears dirty flag) function
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex, MutexGuard,
+    atomic::{AtomicBool, Ordering},
 };
 
 use crate::{mmdevice::MMdevice, traps::TrapType};
@@ -271,7 +271,7 @@ impl MMdevice for SimpleScreenbuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::{AtomicAccess, MemoryBus, FRAMEBUFFER_ADDRESS};
+    use crate::bus::{AtomicAccess, FRAMEBUFFER_ADDRESS, MemoryBus};
 
     #[test]
     fn params_match_the_device_tree() {

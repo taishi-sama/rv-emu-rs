@@ -7,8 +7,8 @@
 
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -36,7 +36,11 @@ pub enum DisplayExit {
     InitFailed,
 }
 
-pub fn run(screen: Arc<SharedScreenBuffer>, emulator_done: Arc<AtomicBool>) -> DisplayExit {
+pub fn run(
+    screen: Arc<SharedScreenBuffer>,
+    emulator_done: Arc<AtomicBool>,
+    instruction_counter: Arc<AtomicU32>,
+) -> DisplayExit {
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
         Err(err) => {
@@ -49,6 +53,8 @@ pub fn run(screen: Arc<SharedScreenBuffer>, emulator_done: Arc<AtomicBool>) -> D
         state: None,
         next_frame: Instant::now(),
         emulator_done,
+        instruction_counter,
+        last_rate_update: Instant::now(),
         exit_reason: None,
     };
     if let Err(err) = event_loop.run_app(&mut app) {
@@ -62,6 +68,8 @@ struct DisplayApp {
     state: Option<GfxState>,
     next_frame: Instant,
     emulator_done: Arc<AtomicBool>,
+    instruction_counter: Arc<AtomicU32>,
+    last_rate_update: Instant,
     exit_reason: Option<DisplayExit>,
 }
 
@@ -96,6 +104,8 @@ impl ApplicationHandler for DisplayApp {
             Ok(state) => {
                 self.state = Some(state);
                 self.next_frame = Instant::now();
+                self.instruction_counter.swap(0, Ordering::Relaxed);
+                self.last_rate_update = Instant::now();
             }
             Err(err) => {
                 eprintln!("display: {err}");
@@ -137,6 +147,23 @@ impl ApplicationHandler for DisplayApp {
             return;
         }
         let now = Instant::now();
+        if self.state.is_some()
+            && now.duration_since(self.last_rate_update) >= Duration::from_secs(2)
+        {
+            let count = self.instruction_counter.swap(0, Ordering::Relaxed);
+            let elapsed = now.duration_since(self.last_rate_update).as_secs_f64();
+            let rate = if elapsed > 0.0 {
+                (count as f64 / elapsed).round() as u64
+            } else {
+                0
+            };
+            if let Some(state) = &self.state {
+                state
+                    .window
+                    .set_title(&format!("{WINDOW_TITLE} — {}", humanize_rate(rate)));
+            }
+            self.last_rate_update = now;
+        }
         if now >= self.next_frame {
             if let Some(state) = &self.state {
                 state.window.request_redraw();
@@ -144,6 +171,16 @@ impl ApplicationHandler for DisplayApp {
             self.next_frame = now + REFRESH_INTERVAL;
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+    }
+}
+
+fn humanize_rate(rate: u64) -> String {
+    if rate >= 1_000_000 {
+        format!("{:.2} MIPS", rate as f64 / 1_000_000.0)
+    } else if rate >= 1_000 {
+        format!("{:.2} KIPS", rate as f64 / 1_000.0)
+    } else {
+        format!("{rate} IPS")
     }
 }
 
@@ -413,5 +450,20 @@ impl GfxState {
         }
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::humanize_rate;
+
+    #[test]
+    fn humanizes_instruction_rates() {
+        assert_eq!(humanize_rate(0), "0 IPS");
+        assert_eq!(humanize_rate(999), "999 IPS");
+        assert_eq!(humanize_rate(1_000), "1.00 KIPS");
+        assert_eq!(humanize_rate(12_345), "12.35 KIPS");
+        assert_eq!(humanize_rate(1_234_567), "1.23 MIPS");
+        assert_eq!(humanize_rate(12_345_678), "12.35 MIPS");
     }
 }

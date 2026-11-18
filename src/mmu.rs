@@ -1,6 +1,6 @@
 use crate::{
     bus::{AtomicAccess, MemoryBus},
-    cpu::{PrivilegeMode, MSTATUS_MXR, MSTATUS_SUM},
+    cpu::{MSTATUS_MXR, MSTATUS_SUM, PrivilegeMode},
     traps::{Trap, TrapType},
 };
 
