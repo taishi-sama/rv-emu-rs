@@ -4,18 +4,20 @@
  * S-mode device tree for rv-emu-rs, headless build: OpenSBI fw_jump + Linux Image.
  *
  * Memory map (src/bus.rs):
- *   0x0c000000  PLIC, 32 device sources; UART is source 10, input is source 11
+ *   0x0c000000  PLIC, 32 device sources; UART is source 10, input is source 11,
+ *               virtio-blk is source 12
  *   0x10000000  UART, 16550-compatible registers at offsets 0-7
  *   0x10000200  audio: sample FIFO (0x0) and sample rate (0x4)
  *   0x10001000  input: goldfish events (keyboard and absolute pointer)
+ *   0x10002000  virtio-mmio block device (raw image attached with --disk)
  *   0x11000000  CLINT: msip at 0x0, mtimecmp at 0x4000, mtime at 0xbff8
  *   0x11100000  syscon: poweroff (0x5555) and reboot (0x7777)
  *   0x30000000  framebuffer, 640x480 a8r8g8b8
  *   0x80000000  128 MiB RAM; the emulator places the DTB in the top 16 KiB
  *
  * The PLIC has two contexts, machine and supervisor external, in the order listed by
- * interrupts-extended. Linux uses the supervisor context; the UART is source 10 and the
- * goldfish input device is source 11.
+ * interrupts-extended. Linux uses the supervisor context; the UART is source 10, the
+ * goldfish input device is source 11 and virtio-blk is source 12.
  *
  * This is the default when --no-display is given. ttyS0 is the preferred
  * console, so the login shell is usable on the serial console.
@@ -123,6 +125,13 @@
             compatible = "google,goldfish-events-keypad";
             interrupt-parent = <&plic>;
             interrupts = <0x0b>;
+        };
+
+        virtio_mmio@10002000 {
+            compatible = "virtio,mmio";
+            reg = <0x00 0x10002000 0x00 0x1000>;
+            interrupt-parent = <&plic>;
+            interrupts = <0x0c>;
         };
 
         clint@11000000 {

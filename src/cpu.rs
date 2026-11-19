@@ -251,6 +251,9 @@ impl CPU {
     /// Return Ok(true) if function handled interrupt, Ok(false) otherwise.
     pub fn handle_interrupt(&mut self) -> Result<bool, EmulatorError> {
         self.state.resample_interrupts = false;
+        //Submit queued device work and drain completions before sampling interrupt lines. The
+        //bus skips this entirely when no optional device (currently virtio) is attached.
+        self.mmu.poll_devices();
         let pending = Self::pending_mip(&self.state, &mut self.mmu);
         let machine = self.state.mie & pending & IMPLEMENTED_INTERRUPT_MASK & !self.state.mideleg;
         let supervisor = self.state.mie & pending & IMPLEMENTED_INTERRUPT_MASK & self.state.mideleg;
@@ -2113,9 +2116,9 @@ mod tests {
         let seip = INTERRUPT_SEI;
         let ssip = INTERRUPT_SSI;
 
-        let line = cpu.mmu.bus.plic.register_source(11).unwrap();
-        cpu.mmu.bus.plic.write_word(11 * 4, 1).unwrap();
-        cpu.mmu.bus.plic.write_word(0x2080, 1 << 11).unwrap();
+        let line = cpu.mmu.bus.plic.register_source(13).unwrap();
+        cpu.mmu.bus.plic.write_word(13 * 4, 1).unwrap();
+        cpu.mmu.bus.plic.write_word(0x2080, 1 << 13).unwrap();
         cpu.mmu.bus.plic.set_level(line, true);
         assert_ne!(cpu.get_csr(0x344).unwrap() & seip, 0);
 

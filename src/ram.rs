@@ -1,6 +1,14 @@
 use crate::{mmdevice::MMdevice, traps::TrapType};
 
 pub const RAM_SIZE: usize = 128 * 1024 * 1024;
+pub const RAM_ADDRESS: u32 = 0x8000_0000;
+
+//Physical guest memory as seen by devices. Devices address RAM directly, without translation
+//through the MMU; a failed range check means the device reports an I/O error to the guest.
+pub trait GuestMemory {
+    fn read_bytes(&self, address: u32, out: &mut [u8]) -> bool;
+    fn write_bytes(&mut self, address: u32, data: &[u8]) -> bool;
+}
 
 pub struct RAM {
     data: Box<[u8]>,
@@ -15,6 +23,37 @@ impl RAM {
     //Raw access used by the ELF/Image loaders and the debugger.
     pub fn read_raw(&self, offset: u32) -> Option<u8> {
         self.data.get(offset as usize).copied()
+    }
+}
+
+impl GuestMemory for RAM {
+    fn read_bytes(&self, address: u32, out: &mut [u8]) -> bool {
+        let Some(offset) = address.checked_sub(RAM_ADDRESS) else {
+            return false;
+        };
+        let start = offset as usize;
+        let Some(end) = start.checked_add(out.len()) else {
+            return false;
+        };
+        let Some(bytes) = self.data.get(start..end) else {
+            return false;
+        };
+        out.copy_from_slice(bytes);
+        true
+    }
+    fn write_bytes(&mut self, address: u32, data: &[u8]) -> bool {
+        let Some(offset) = address.checked_sub(RAM_ADDRESS) else {
+            return false;
+        };
+        let start = offset as usize;
+        let Some(end) = start.checked_add(data.len()) else {
+            return false;
+        };
+        let Some(bytes) = self.data.get_mut(start..end) else {
+            return false;
+        };
+        bytes.copy_from_slice(data);
+        true
     }
 }
 

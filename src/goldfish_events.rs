@@ -305,9 +305,7 @@ mod tests {
         assert_eq!(device.read_word(REG_LEN).unwrap(), KEY_BITMAP_BYTES as u32);
         let left_button_bit = BTN_LEFT as u32;
         assert_ne!(
-            device
-                .read_byte(REG_DATA + left_button_bit / 8)
-                .unwrap()
+            device.read_byte(REG_DATA + left_button_bit / 8).unwrap()
                 & (1 << (left_button_bit % 8)),
             0
         );

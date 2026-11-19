@@ -391,6 +391,12 @@ impl MMU {
     pub fn seip(&mut self) -> bool {
         self.bus.external_interrupt_pending(PlicContext::Supervisor)
     }
+    //Let devices submit queued work and drain asynchronous completions. This runs once per
+    //device-update batch, separately from interrupt-line sampling.
+    #[inline]
+    pub fn poll_devices(&mut self) {
+        self.bus.poll_devices();
+    }
     //Sample device interrupt lines into the PLIC before the CPU samples its external lines.
     #[inline]
     pub fn poll_irqs(&mut self) {

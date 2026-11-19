@@ -39,6 +39,7 @@ pub mod simple_framebuffer;
 pub mod syscon;
 pub mod traps;
 pub mod uart;
+pub mod virtio;
 //pub mod gdb;
 
 //The kernel image needs Sv32 and 128 MiB of RAM; the initramfs does not fit in less.
@@ -74,6 +75,10 @@ Boot modes:
   --payload <blob> [dtb]   flat OpenSBI fw_payload.bin blob; the dtb default follows
                            --no-display as above
 
+Virtio:
+  --disk <path> [--disk-ro]
+                           attach a raw image as virtio-blk (/dev/vda)
+
 Without a dtb, --no-display selects the serial-console device tree; otherwise the
 framebuffer-console one is used. Without an image the bad_apple demo build is used."
 )]
@@ -85,6 +90,14 @@ struct Args {
     /// Run headless without the framebuffer window
     #[arg(long)]
     no_display: bool,
+
+    /// Attach a raw disk image as virtio-blk (/dev/vda)
+    #[arg(long, value_name = "PATH")]
+    disk: Option<String>,
+
+    /// Open the disk image read-only
+    #[arg(long, requires = "disk")]
+    disk_ro: bool,
 
     /// Image to boot: an ELF, a flat kernel Image, or (with --payload) a fw_payload.bin
     /// blob; the firmware boot takes all three paths <fw_dynamic.bin> <Image> <dtb>.
@@ -130,7 +143,16 @@ fn main() {
     };
     let contents = read_or_exit(&path, "image");
 
-    let (bus, audio) = MemoryBus::new();
+    let (mut bus, audio) = MemoryBus::new();
+    if let Some(path) = &args.disk {
+        if let Err(err) = bus.attach_disk(path, args.disk_ro) {
+            exit_with(format!("could not attach disk \"{path}\": {err}"));
+        }
+        println!(
+            "Attaching disk \"{path}\"{}",
+            if args.disk_ro { " (read-only)" } else { "" }
+        );
+    }
     //Keep a host-side handle after the bus is moved into the MMU.
     let screen_buffer = bus.framebuffer.shared();
     if let Some((_stream, stream_handle)) = &audio_output {

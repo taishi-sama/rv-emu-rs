@@ -5,7 +5,7 @@ My small personal project targeted to write RISC-V emulator with decent accuracy
 
 Current target instruction set is rv32imafdc, with Sv32 virtual memory and user mode - essentially full RV32GC.
 
-Devices list contains a 16550-compatible UART, a stereo 16-bit audio device with a programmable sample rate, a simple 640x480 framebuffer, a Goldfish events keyboard/absolute-pointer input device, a PLIC, a CLINT and a syscon. Will be extended in the future.
+Devices list contains a 16550-compatible UART, a stereo 16-bit audio device with a programmable sample rate, a simple 640x480 framebuffer, a Goldfish events keyboard/absolute-pointer input device, a PLIC, a virtio-mmio block device, a CLINT and a syscon. Will be extended in the future.
 
 # DOOM SHOWCASE
 https://github.com/user-attachments/assets/0e2e8eab-3d41-4dde-a272-1f81b0bc895d
@@ -69,6 +69,19 @@ while the window has focus.
 
 The F and D extensions are built in by default; a strict RV32IMAC build without them is
 `cargo run --no-default-features`.
+
+A raw image can be attached as a virtio-blk disk (`/dev/vda`) with:
+
+```sh
+truncate -s 64M /tmp/virtio-disk.img
+mkfs.ext4 -F -q /tmp/virtio-disk.img
+cargo run --profile maxspeed -- --payload images/fw_payload.bin \
+    --disk /tmp/virtio-disk.img
+```
+
+Add `--disk-ro` to advertise the disk as read-only. The kernel image is expected to have
+`CONFIG_VIRTIO_MMIO`, `CONFIG_VIRTIO_BLK` and the filesystem driver built in; the emulator
+does not require a PCI bus.
 
 # Developing
 

@@ -71,9 +71,6 @@ pub struct Plic {
     priorities: Box<[u32]>,
     //One pending bit per source. These bits are global; the in-service bits are per context.
     pending: Box<[u32]>,
-    //The last level reported by a level-triggered source. Completion uses this to re-arm a
-    //source whose device is still asserting its line.
-    levels: Box<[u32]>,
     //contexts * words: one enable bitmap per context.
     enables: Box<[u32]>,
     //One threshold per context.
@@ -103,7 +100,6 @@ impl Plic {
             words,
             priorities: vec![0; sources as usize].into_boxed_slice(),
             pending: vec![0; words].into_boxed_slice(),
-            levels: vec![0; words].into_boxed_slice(),
             enables: vec![0; contexts * words].into_boxed_slice(),
             thresholds: vec![0; contexts].into_boxed_slice(),
             in_service: vec![0; contexts * words].into_boxed_slice(),
@@ -159,15 +155,9 @@ impl Plic {
         let word = source / 32;
         let bit = 1u32 << (source % 32);
         if level {
-            self.levels[word] |= bit;
-            if self.pending[word] & bit == 0 {
-                self.pending[word] |= bit;
-            }
+            self.pending[word] |= bit;
         } else {
-            self.levels[word] &= !bit;
-            if self.pending[word] & bit != 0 {
-                self.pending[word] &= !bit;
-            }
+            self.pending[word] &= !bit;
         }
     }
 
@@ -248,8 +238,11 @@ impl Plic {
         best
     }
 
-    /// Completes a previously claimed source. The source becomes eligible again if it is still
-    /// pending (for example, a level source that has not been serviced yet).
+    /// Completes a previously claimed source.
+    ///
+    /// Pending is not re-armed from a remembered level. A level-triggered device re-asserts its
+    /// line through `set_level` on the next device poll, so completion observes the current
+    /// line instead of a stale sample taken before the handler acknowledged the device.
     pub fn complete(&mut self, context: PlicContext, source: u32) {
         let Some(context_index) = self.context_index(context) else {
             return;
@@ -257,13 +250,7 @@ impl Plic {
         if source == 0 || source >= self.sources || !self.is_assigned(source) {
             return;
         }
-        let source_index = source as usize;
-        self.clear_in_service(context_index, source_index);
-        //A level-triggered device may still be asserting its line after the handler completed.
-        //Re-arm pending now so the next poll does not need to wait for another device update.
-        if self.levels[source_index / 32] & (1u32 << (source_index % 32)) != 0 {
-            self.pending[source_index / 32] |= 1u32 << (source_index % 32);
-        }
+        self.clear_in_service(context_index, source as usize);
     }
 
     fn context_index(&self, context: PlicContext) -> Option<usize> {
@@ -301,7 +288,6 @@ impl Plic {
     fn reset_source(&mut self, source: u32) {
         let source_index = source as usize;
         self.clear_pending(source_index);
-        self.levels[source_index / 32] &= !(1u32 << (source_index % 32));
         for context in 0..self.contexts {
             self.clear_enable(context, source_index);
             self.clear_in_service(context, source_index);
@@ -556,6 +542,10 @@ mod tests {
         //The line is still high, but the source is in service, so it is not deliverable.
         assert!(!plic.pending_for(PlicContext::Supervisor));
         complete(&mut plic, PlicContext::Supervisor, 6);
+        //Completion does not trust a stale level. The next device poll re-asserts the still-high
+        //line, which is what makes the source deliverable again.
+        assert!(!plic.pending_for(PlicContext::Supervisor));
+        plic.set_level(line, true);
         assert!(plic.pending_for(PlicContext::Supervisor));
         assert_eq!(claim(&mut plic, PlicContext::Supervisor), 6);
     }

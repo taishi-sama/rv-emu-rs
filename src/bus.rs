@@ -9,20 +9,27 @@ use crate::{
     syscon::Syscon,
     traps::{Trap, TrapType},
     uart::{self, UART},
+    virtio::{
+        blk::{self, VirtioBlk, WorkerBlockIo},
+        mmio::{NoDevice, VirtioMmio},
+    },
 };
 
+pub use crate::ram::RAM_ADDRESS;
+
 //Physical memory map. Devices only know their region size; the bus owns the addresses.
-pub const RAM_ADDRESS: u32 = 0x80000000;
 pub const PLIC_ADDRESS: u32 = 0x0c000000;
 pub const UART_ADDRESS: u32 = 0x10000000;
 pub const PRIMITIVE_AUDIO_ADDRESS: u32 = 0x10000200;
 pub const GOLDFISH_EVENTS_ADDRESS: u32 = 0x10001000;
+pub const VIRTIO_ADDRESS: u32 = 0x10002000;
 pub const CLINT_ADDRESS: u32 = 0x11000000;
 pub const SYSCON_ADDRESS: u32 = 0x11100000;
 pub const FRAMEBUFFER_ADDRESS: u32 = 0x30000000;
 
 //The PLIC has 32 device sources plus the reserved source 0, matching riscv,ndev = <0x20> in
-//the device tree. Source 10 is the UART and source 11 is the goldfish input device.
+//the device tree. Source 10 is the UART, source 11 the goldfish input device and source 12
+//virtio-blk.
 const PLIC_SOURCES: u32 = 33;
 
 //Range patterns need a single constant bound, so each device's exclusive region end is named here.
@@ -31,6 +38,7 @@ const PLIC_END: u32 = PLIC_ADDRESS + Plic::MEMORY_REGION_SIZE;
 const UART_END: u32 = UART_ADDRESS + UART::MEMORY_REGION_SIZE;
 const AUDIO_END: u32 = PRIMITIVE_AUDIO_ADDRESS + PrimitiveAudioReceiver::MEMORY_REGION_SIZE;
 const GOLDFISH_EVENTS_END: u32 = GOLDFISH_EVENTS_ADDRESS + GoldfishEvents::MEMORY_REGION_SIZE;
+const VIRTIO_END: u32 = VIRTIO_ADDRESS + VirtioMmio::MEMORY_REGION_SIZE;
 const CLINT_END: u32 = CLINT_ADDRESS + Clint::MEMORY_REGION_SIZE;
 const SYSCON_END: u32 = SYSCON_ADDRESS + Syscon::MEMORY_REGION_SIZE;
 const FRAMEBUFFER_END: u32 = FRAMEBUFFER_ADDRESS + SimpleScreenbuffer::MEMORY_REGION_SIZE;
@@ -66,6 +74,7 @@ pub struct MemoryBus {
     pub audio: PrimitiveAudioReceiver,
     pub input: GoldfishEvents,
     pub framebuffer: SimpleScreenbuffer,
+    pub virtio: VirtioMmio,
     pub clint: Clint,
     pub syscon: Syscon,
 }
@@ -80,6 +89,9 @@ impl MemoryBus {
         let input_irq = plic
             .register_source(goldfish_events::IRQ)
             .expect("input PLIC source must be available");
+        let virtio_irq = plic
+            .register_source(blk::IRQ)
+            .expect("virtio PLIC source must be available");
         (
             MemoryBus {
                 ram: RAM::new(),
@@ -88,21 +100,47 @@ impl MemoryBus {
                 audio: audio_res,
                 input: GoldfishEvents::new(input_irq),
                 framebuffer: SimpleScreenbuffer::new(),
+                virtio: VirtioMmio::new(virtio_irq, Box::new(NoDevice)),
                 clint: Clint::new(),
                 syscon: Syscon::new(),
             },
             audio_prod,
         )
     }
+    //Attach a raw image to the virtio-mmio slot. The PLIC source stays registered across the
+    //swap; the old placeholder device (or an earlier disk) is dropped.
+    pub fn attach_disk(&mut self, path: &str, read_only: bool) -> std::io::Result<()> {
+        let backend = WorkerBlockIo::open(path, read_only)?;
+        let irq = self.virtio.irq();
+        self.virtio = VirtioMmio::new(irq, Box::new(VirtioBlk::new(Box::new(backend))));
+        Ok(())
+    }
+    //Run virtio queue submission and completion without blocking on host I/O. The CPU calls
+    //this once per device-update batch, before sampling interrupt lines.
+    #[inline]
+    pub fn poll_devices(&mut self) {
+        if !self.virtio.is_active() {
+            return;
+        }
+        let MemoryBus { virtio, ram, .. } = self;
+        virtio.poll(ram);
+    }
     //Push the current device line levels into the PLIC. The CPU calls this before sampling its
     //external-interrupt lines; devices never claim or complete interrupts themselves.
     #[inline]
     pub fn poll_irq_lines(&mut self) {
         let MemoryBus {
-            plic, uart, input, ..
+            plic,
+            uart,
+            input,
+            virtio,
+            ..
         } = self;
         uart.poll_irqs(plic);
         input.poll_irqs(plic);
+        if virtio.is_active() {
+            virtio.poll_irqs(plic);
+        }
     }
     #[inline]
     pub fn external_interrupt_pending(&self, context: PlicContext) -> bool {
@@ -208,6 +246,7 @@ impl MemoryBus {
             GOLDFISH_EVENTS_ADDRESS..GOLDFISH_EVENTS_END => {
                 self.input.read_word(address - GOLDFISH_EVENTS_ADDRESS)
             }
+            VIRTIO_ADDRESS..VIRTIO_END => self.virtio.read_word(address - VIRTIO_ADDRESS),
             FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => {
                 self.framebuffer.read_word(address - FRAMEBUFFER_ADDRESS)
             }
@@ -224,6 +263,7 @@ impl MemoryBus {
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => {
                 self.audio.read_halfword(address - PRIMITIVE_AUDIO_ADDRESS)
             }
+            VIRTIO_ADDRESS..VIRTIO_END => self.virtio.read_halfword(address - VIRTIO_ADDRESS),
             FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => self
                 .framebuffer
                 .read_halfword(address - FRAMEBUFFER_ADDRESS),
@@ -243,6 +283,7 @@ impl MemoryBus {
             GOLDFISH_EVENTS_ADDRESS..GOLDFISH_EVENTS_END => {
                 self.input.read_byte(address - GOLDFISH_EVENTS_ADDRESS)
             }
+            VIRTIO_ADDRESS..VIRTIO_END => self.virtio.read_byte(address - VIRTIO_ADDRESS),
             FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => {
                 self.framebuffer.read_byte(address - FRAMEBUFFER_ADDRESS)
             }
@@ -263,6 +304,7 @@ impl MemoryBus {
             GOLDFISH_EVENTS_ADDRESS..GOLDFISH_EVENTS_END => self
                 .input
                 .write_word(address - GOLDFISH_EVENTS_ADDRESS, word),
+            VIRTIO_ADDRESS..VIRTIO_END => self.virtio.write_word(address - VIRTIO_ADDRESS, word),
             FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => self
                 .framebuffer
                 .write_word(address - FRAMEBUFFER_ADDRESS, word),
@@ -292,7 +334,8 @@ impl MemoryBus {
     pub fn check_write_dword(&self, address: u32) -> Result<(), Trap> {
         //The input region is deliberately absent: a 64-bit store would split
         //into a page-select write followed by a fault, so reject it before the
-        //first word takes effect.
+        //first word takes effect. Virtio is absent too: the protocol has no
+        //64-bit store; queue-address pairs are written as two 32-bit registers.
         let regions = [
             (RAM_ADDRESS, RAM_END),
             (UART_ADDRESS, UART_END),
@@ -333,6 +376,9 @@ impl MemoryBus {
             PRIMITIVE_AUDIO_ADDRESS..AUDIO_END => self
                 .audio
                 .write_halfword(address - PRIMITIVE_AUDIO_ADDRESS, halfword),
+            VIRTIO_ADDRESS..VIRTIO_END => self
+                .virtio
+                .write_halfword(address - VIRTIO_ADDRESS, halfword),
             FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => self
                 .framebuffer
                 .write_halfword(address - FRAMEBUFFER_ADDRESS, halfword),
@@ -356,6 +402,7 @@ impl MemoryBus {
             GOLDFISH_EVENTS_ADDRESS..GOLDFISH_EVENTS_END => self
                 .input
                 .write_byte(address - GOLDFISH_EVENTS_ADDRESS, byte),
+            VIRTIO_ADDRESS..VIRTIO_END => self.virtio.write_byte(address - VIRTIO_ADDRESS, byte),
             FRAMEBUFFER_ADDRESS..FRAMEBUFFER_END => self
                 .framebuffer
                 .write_byte(address - FRAMEBUFFER_ADDRESS, byte),
