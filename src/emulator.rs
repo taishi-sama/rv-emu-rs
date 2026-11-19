@@ -24,6 +24,12 @@ const FW_DYNAMIC_NEXT_MODE_S: u32 = 1;
 //The boot info record must never reach the device tree; this is a compile-time layout check.
 const _: () = assert!(FW_DYNAMIC_INFO_ADDRESS + FW_DYNAMIC_INFO_SIZE <= DTB_ADDRESS);
 
+//U-Boot's RISC-V QEMU S-mode build is linked at 0x80400000. It relocates itself
+//to the top of RAM before booting the kernel, which frees this address again.
+//The value mirrors CONFIG_TEXT_BASE from board/emulation/qemu-riscv/Kconfig in
+//U-Boot's qemu-riscv32_smode_defconfig; a board link-address change must update it.
+pub const UBOOT_LOAD_ADDRESS: u32 = RAM_ADDRESS + 0x0040_0000;
+
 pub struct Emulator {
     pub cpu: CPU,
 }
@@ -64,39 +70,69 @@ impl Emulator {
         firmware: Vec<u8>,
         kernel: Vec<u8>,
         dtb: Vec<u8>,
-        mut mmu: MMU,
+        mmu: MMU,
     ) -> Result<Self, String> {
-        Self::check_dtb(&dtb)?;
         let text_offset = Self::image_text_offset(&kernel)?;
         if text_offset >= RAM_SIZE as u32 {
             return Err(format!(
                 "kernel text offset 0x{text_offset:08x} is outside RAM"
             ));
         }
-        let kernel_address = RAM_ADDRESS + text_offset;
-        if firmware.len() as u64 > text_offset as u64 {
-            return Err("firmware overlaps the kernel image".to_string());
+        Self::from_firmware_at(firmware, kernel, dtb, RAM_ADDRESS + text_offset, mmu)
+    }
+    //Boots OpenSBI fw_dynamic with a flat S-mode payload at U-Boot's link address. U-Boot has
+    //no RISC-V Image header, so the address comes from its board configuration rather than from
+    //the image itself.
+    pub fn from_uboot(
+        firmware: Vec<u8>,
+        uboot: Vec<u8>,
+        dtb: Vec<u8>,
+        mmu: MMU,
+    ) -> Result<Self, String> {
+        Self::from_firmware_at(firmware, uboot, dtb, UBOOT_LOAD_ADDRESS, mmu)
+    }
+    //Loads OpenSBI at the base of RAM and a flat payload at an explicit address. OpenSBI enters
+    //the payload in S-mode at that address with a0 = hart id and a1 = device tree.
+    fn from_firmware_at(
+        firmware: Vec<u8>,
+        payload: Vec<u8>,
+        dtb: Vec<u8>,
+        payload_address: u32,
+        mut mmu: MMU,
+    ) -> Result<Self, String> {
+        Self::check_dtb(&dtb)?;
+        let payload_offset = payload_address.wrapping_sub(RAM_ADDRESS);
+        if payload_address < RAM_ADDRESS || payload_offset >= RAM_SIZE as u32 {
+            return Err(format!(
+                "payload address 0x{payload_address:08x} is outside RAM"
+            ));
         }
-        if kernel_address as u64 + kernel.len() as u64 > FW_DYNAMIC_INFO_ADDRESS as u64 {
-            return Err("kernel image overlaps the boot info record".to_string());
+        //Only the loaded firmware image is checked here. OpenSBI's heap and scratch sit
+        //above _fw_end, inside the <0x50000 runtime region it reserves in the FDT; the
+        //supported payload addresses (0x80400000) leave several MiB of headroom.
+        if firmware.len() as u64 > u64::from(payload_offset) {
+            return Err("firmware overlaps the payload".to_string());
+        }
+        if payload_address as u64 + payload.len() as u64 > FW_DYNAMIC_INFO_ADDRESS as u64 {
+            return Err("payload overlaps the boot info record".to_string());
         }
         for (offset, byte) in firmware.iter().enumerate() {
             if !mmu.bus.write_raw_to_ram(RAM_ADDRESS + offset as u32, *byte) {
                 return Err("firmware does not fit in RAM".to_string());
             }
         }
-        for (offset, byte) in kernel.iter().enumerate() {
+        for (offset, byte) in payload.iter().enumerate() {
             if !mmu
                 .bus
-                .write_raw_to_ram(kernel_address + offset as u32, *byte)
+                .write_raw_to_ram(payload_address + offset as u32, *byte)
             {
-                return Err("kernel image does not fit in RAM".to_string());
+                return Err("payload does not fit in RAM".to_string());
             }
         }
         let boot_info = [
             FW_DYNAMIC_MAGIC,
             FW_DYNAMIC_VERSION,
-            kernel_address,
+            payload_address,
             FW_DYNAMIC_NEXT_MODE_S,
             0, // options
             0, // boot hart
@@ -180,5 +216,113 @@ impl Emulator {
     }
     pub fn take_syscon_event(&mut self) -> Option<SysconEvent> {
         self.cpu.mmu.bus.syscon.take_event()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::MemoryBus;
+
+    fn test_dtb() -> Vec<u8> {
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/rv-emu-rs-sv32.dtb"))
+            .expect("the repo device tree must exist")
+    }
+
+    fn boot_error(result: Result<Emulator, String>) -> String {
+        match result {
+            Ok(_) => panic!("boot should have been rejected"),
+            Err(err) => err,
+        }
+    }
+
+    fn boot_info_word(bus: &crate::bus::MemoryBus, index: u32) -> u32 {
+        let mut bytes = [0u8; 4];
+        for (offset, byte) in bytes.iter_mut().enumerate() {
+            *byte = bus
+                .read_raw_from_ram(FW_DYNAMIC_INFO_ADDRESS + index * 4 + offset as u32)
+                .expect("boot info record must be in RAM");
+        }
+        u32::from_le_bytes(bytes)
+    }
+
+    #[test]
+    fn uboot_loads_at_its_linked_address() {
+        let (bus, _audio) = MemoryBus::new();
+        let emu = Emulator::from_uboot(vec![0x11; 4], vec![0x22; 8], test_dtb(), MMU::new(bus))
+            .expect("U-Boot boot must set up");
+        assert_eq!(UBOOT_LOAD_ADDRESS, 0x8040_0000);
+        assert_eq!(emu.cpu.state.pc, RAM_ADDRESS);
+        assert_eq!(emu.cpu.state.get_x(10), 0);
+        assert_eq!(emu.cpu.state.get_x(11), DTB_ADDRESS);
+        assert_eq!(emu.cpu.state.get_x(12), FW_DYNAMIC_INFO_ADDRESS);
+        for offset in 0..4 {
+            assert_eq!(
+                emu.cpu.mmu.bus.read_raw_from_ram(RAM_ADDRESS + offset),
+                Some(0x11)
+            );
+        }
+        for offset in 0..8 {
+            assert_eq!(
+                emu.cpu
+                    .mmu
+                    .bus
+                    .read_raw_from_ram(UBOOT_LOAD_ADDRESS + offset),
+                Some(0x22)
+            );
+        }
+        let expected = [
+            FW_DYNAMIC_MAGIC,
+            FW_DYNAMIC_VERSION,
+            UBOOT_LOAD_ADDRESS,
+            FW_DYNAMIC_NEXT_MODE_S,
+            0,
+            0,
+        ];
+        for (index, word) in expected.iter().enumerate() {
+            assert_eq!(boot_info_word(&emu.cpu.mmu.bus, index as u32), *word);
+        }
+    }
+
+    #[test]
+    fn firmware_boot_rejects_an_overlapping_payload() {
+        let (bus, _audio) = MemoryBus::new();
+        let err = boot_error(Emulator::from_firmware_at(
+            vec![0x11; 8],
+            vec![0x22; 4],
+            test_dtb(),
+            RAM_ADDRESS + 4,
+            MMU::new(bus),
+        ));
+        assert_eq!(err, "firmware overlaps the payload");
+    }
+
+    #[test]
+    fn firmware_boot_rejects_a_payload_outside_ram() {
+        let (bus, _audio) = MemoryBus::new();
+        let err = boot_error(Emulator::from_firmware_at(
+            Vec::new(),
+            vec![0x22; 4],
+            test_dtb(),
+            RAM_ADDRESS - 4,
+            MMU::new(bus),
+        ));
+        assert_eq!(
+            err,
+            format!("payload address 0x{:08x} is outside RAM", RAM_ADDRESS - 4)
+        );
+    }
+
+    #[test]
+    fn firmware_boot_rejects_a_payload_over_the_boot_info() {
+        let (bus, _audio) = MemoryBus::new();
+        let err = boot_error(Emulator::from_firmware_at(
+            Vec::new(),
+            vec![0x22; 4],
+            test_dtb(),
+            FW_DYNAMIC_INFO_ADDRESS - 2,
+            MMU::new(bus),
+        ));
+        assert_eq!(err, "payload overlaps the boot info record");
     }
 }

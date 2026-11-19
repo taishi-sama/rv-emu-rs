@@ -58,6 +58,15 @@ fn default_dtb(no_display: bool) -> &'static str {
     }
 }
 
+//The optional DTB path follows the positional arguments; without one the tree matching
+//--no-display is used.
+fn dtb_at_or_default(paths: &[String], index: usize, no_display: bool) -> &str {
+    paths
+        .get(index)
+        .map(String::as_str)
+        .unwrap_or_else(|| default_dtb(no_display))
+}
+
 //Command line. Help, version, unknown-option diagnostics and the `--` separator come from
 //clap; the boot mode is picked from the flag, the number of paths and the image contents.
 #[derive(Parser)]
@@ -72,6 +81,10 @@ Boot modes:
                            rv-emu-rs-sv32-nodisplay.dtb with --no-display
   <image> <dtb>            flat kernel Image with an explicit device tree
   <fw> <Image> <dtb>       OpenSBI fw_dynamic.bin firmware, kernel Image and device tree
+  --uboot <fw> <u-boot.bin> [dtb]
+                           OpenSBI fw_dynamic.bin plus a flat U-Boot loaded at
+                           0x80400000 instead of a Linux Image header; the dtb
+                           default follows --no-display as above
   --payload <blob> [dtb]   flat OpenSBI fw_payload.bin blob; the dtb default follows
                            --no-display as above
 
@@ -87,6 +100,10 @@ struct Args {
     #[arg(long)]
     payload: bool,
 
+    /// Load <fw> <u-boot.bin> [dtb] with U-Boot flat at 0x80400000
+    #[arg(long)]
+    uboot: bool,
+
     /// Run headless without the framebuffer window
     #[arg(long)]
     no_display: bool,
@@ -100,7 +117,8 @@ struct Args {
     disk_ro: bool,
 
     /// Image to boot: an ELF, a flat kernel Image, or (with --payload) a fw_payload.bin
-    /// blob; the firmware boot takes all three paths <fw_dynamic.bin> <Image> <dtb>.
+    /// blob; the firmware boot takes all three paths <fw_dynamic.bin> <Image> <dtb>, and
+    /// --uboot takes <fw_dynamic.bin> <u-boot.bin> [dtb].
     /// Defaults to the bad_apple demo build.
     #[arg(value_name = "IMAGE [DTB]", num_args = 0..=3)]
     paths: Vec<String>,
@@ -120,10 +138,20 @@ fn read_or_exit(path: &str, what: &str) -> Vec<u8> {
 
 fn main() {
     let args = Args::parse();
+    if args.uboot && args.payload {
+        exit_with("--uboot cannot be combined with --payload");
+    }
     //The payload boot has no firmware-triple form.
     if args.payload && !(1..=2).contains(&args.paths.len()) {
         exit_with(format!(
             "--payload takes <fw_payload.bin> [dtb], got {} argument(s)",
+            args.paths.len()
+        ));
+    }
+    //clap already caps the positionals at three, so this only rejects a missing U-Boot path.
+    if args.uboot && args.paths.len() < 2 {
+        exit_with(format!(
+            "--uboot takes <fw_dynamic.bin> <u-boot.bin> [dtb], got {} argument(s)",
             args.paths.len()
         ));
     }
@@ -141,7 +169,16 @@ fn main() {
             None
         }
     };
-    let contents = read_or_exit(&path, "image");
+    let contents = read_or_exit(
+        &path,
+        if args.uboot || args.paths.len() == 3 {
+            "firmware"
+        } else if args.payload {
+            "payload"
+        } else {
+            "image"
+        },
+    );
 
     let (mut bus, audio) = MemoryBus::new();
     if let Some(path) = &args.disk {
@@ -160,49 +197,71 @@ fn main() {
             eprintln!("audio: could not start playback ({err}); continuing without sound");
         }
     }
-    //Four boot paths: --payload <fw_payload.bin> [dtb] (OpenSBI and the kernel in one blob),
-    //<fw_dynamic.bin> <Image> <dtb> (M-mode firmware, boot info record in a2), a flat kernel
-    //Image booted in M-mode, or an ELF. The DTB defaults to rv-emu-rs-sv32.dtb when omitted.
+    //Five boot paths: --payload <fw_payload.bin> [dtb] (OpenSBI and the kernel in one blob),
+    //<fw_dynamic.bin> <Image> <dtb> (M-mode firmware, boot info record in a2), --uboot
+    //<fw_dynamic.bin> <u-boot.bin> [dtb] (U-Boot at its 0x80400000 link address), a flat
+    //kernel Image booted in M-mode, or an ELF. The DTB defaults to rv-emu-rs-sv32.dtb when
+    //omitted; --no-display selects the serial-console tree instead.
     let emu = if args.payload {
         if contents.starts_with(b"\x7fELF") {
             exit_with("the payload must be a flat binary (fw_payload.bin), not an ELF");
         }
-        let dtb_path = args
-            .paths
-            .get(1)
-            .map(String::as_str)
-            .unwrap_or_else(|| default_dtb(args.no_display));
+        let dtb_path = dtb_at_or_default(&args.paths, 1, args.no_display);
         let dtb = read_or_exit(dtb_path, "device tree");
         println!("Loading payload \"{path}\" with dtb \"{dtb_path}\"");
         emulator::Emulator::from_payload(contents, dtb, MMU::new(bus))
-    } else if args.paths.len() == 3 {
+    } else if args.uboot || args.paths.len() == 3 {
         let kernel_path = &args.paths[1];
-        let dtb_path = &args.paths[2];
+        let dtb_path = dtb_at_or_default(&args.paths, 2, args.no_display);
         if contents.starts_with(b"\x7fELF") {
             exit_with("the firmware must be a flat binary (fw_dynamic.bin), not an ELF");
         }
-        let kernel = read_or_exit(kernel_path, "kernel image");
+        let kernel = read_or_exit(
+            kernel_path,
+            if args.uboot {
+                "U-Boot image"
+            } else {
+                "kernel image"
+            },
+        );
+        if args.uboot && kernel.starts_with(b"\x7fELF") {
+            exit_with("the U-Boot image must be a flat binary (u-boot.bin), not an ELF");
+        }
+        if args.uboot && kernel.starts_with(&[0x27, 0x05, 0x19, 0x56]) {
+            exit_with("the U-Boot image must be u-boot.bin, not a u-boot.img legacy image");
+        }
+        if args.uboot && kernel.starts_with(&[0xd0, 0x0d, 0xfe, 0xed]) {
+            exit_with("the U-Boot image must be u-boot.bin, not a FIT image (u-boot.itb)");
+        }
         let dtb = read_or_exit(dtb_path, "device tree");
-        println!("Loading firmware \"{path}\", kernel \"{kernel_path}\", dtb \"{dtb_path}\"");
-        emulator::Emulator::from_firmware(contents, kernel, dtb, MMU::new(bus))
+        if args.uboot {
+            println!("Loading firmware \"{path}\", U-Boot \"{kernel_path}\", dtb \"{dtb_path}\"");
+            emulator::Emulator::from_uboot(contents, kernel, dtb, MMU::new(bus))
+        } else {
+            println!("Loading firmware \"{path}\", kernel \"{kernel_path}\", dtb \"{dtb_path}\"");
+            emulator::Emulator::from_firmware(contents, kernel, dtb, MMU::new(bus))
+        }
     } else if contents.starts_with(b"\x7fELF") {
         println!("Loading elf \"{path}\"");
         emulator::Emulator::from_elf(contents, MMU::new(bus))
     } else {
         //A flat kernel Image; the device tree defaults to the one built from rv-emu-rs-sv32.dts.
-        let dtb_path = args
-            .paths
-            .get(1)
-            .cloned()
-            .unwrap_or_else(|| default_dtb(args.no_display).to_string());
-        let dtb = read_or_exit(&dtb_path, "device tree");
+        let dtb_path = dtb_at_or_default(&args.paths, 1, args.no_display);
+        let dtb = read_or_exit(dtb_path, "device tree");
         println!("Loading image \"{path}\" with dtb \"{dtb_path}\"");
         emulator::Emulator::from_image(contents, dtb, MMU::new(bus))
     };
     let emu = match emu {
         Ok(emu) => emu,
         Err(err) => {
-            eprintln!("error: could not boot \"{path}\": {err}");
+            if args.uboot {
+                eprintln!(
+                    "error: could not boot U-Boot \"{}\" with firmware \"{path}\": {err}",
+                    args.paths[1]
+                );
+            } else {
+                eprintln!("error: could not boot \"{path}\": {err}");
+            }
             process::exit(1);
         }
     };
@@ -375,6 +434,27 @@ mod test {
     fn no_display_selects_the_serial_console_dtb() {
         assert_eq!(super::default_dtb(false), "rv-emu-rs-sv32.dtb");
         assert_eq!(super::default_dtb(true), "rv-emu-rs-sv32-nodisplay.dtb");
+    }
+
+    #[test]
+    fn omitted_dtb_uses_the_display_matching_default() {
+        let paths = |args: &[&str]| args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+
+        let uboot = paths(&["images/fw_dynamic.bin", "images/u-boot.bin"]);
+        assert_eq!(
+            super::dtb_at_or_default(&uboot, 2, false),
+            "rv-emu-rs-sv32.dtb"
+        );
+        assert_eq!(
+            super::dtb_at_or_default(&uboot, 2, true),
+            "rv-emu-rs-sv32-nodisplay.dtb"
+        );
+
+        let uboot_with_dtb = paths(&["images/fw_dynamic.bin", "images/u-boot.bin", "custom.dtb"]);
+        assert_eq!(
+            super::dtb_at_or_default(&uboot_with_dtb, 2, true),
+            "custom.dtb"
+        );
     }
 
     fn test_asm_dir() -> PathBuf {

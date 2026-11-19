@@ -1,4 +1,5 @@
-# RV32IMAFDC (Sv32 MMU), musl, internal toolchain, Linux + OpenSBI fw_payload.
+# RV32IMAFDC (Sv32 MMU), musl, internal toolchain, Linux + OpenSBI fw_dynamic
+# and U-Boot, with the root filesystem on a partitioned virtio-blk disk.
 BR2_riscv=y
 BR2_RISCV_ISA_RVC=y
 BR2_RISCV_32=y
@@ -9,7 +10,7 @@ BR2_GCC_VERSION_16_X=y
 # Board files (kernel configuration and the rootfs overlay) live in this tree.
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RVEMURS_PATH)/board/rv-emu-rs/rootfs-overlay"
 
-# Kernel: arch defconfig + 32-bit fragment + board fragment (no rv32_defconfig since 7.1).
+# Kernel: arch defconfig + 32-bit fragment + board fragment, no initramfs.
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RVEMURS_PATH)/board/rv-emu-rs/32-bit.config $(BR2_EXTERNAL_RVEMURS_PATH)/board/rv-emu-rs/linux.fragment"
@@ -22,13 +23,32 @@ BR2_PACKAGE_PRIMITIVE_AUDIO=y
 BR2_PACKAGE_COREMARK=y
 BR2_PACKAGE_STRESS_NG=y
 
-# Single fw_payload.bin: OpenSBI and the kernel in one blob.
-BR2_TARGET_ROOTFS_INITRAMFS=y
+# Root filesystem on partition 2 of the virtio disk.
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ROOTFS_EXT2_SIZE="128M"
+BR2_TARGET_ROOTFS_EXT2_LABEL="rootfs"
+# BR2_TARGET_ROOTFS_INITRAMFS is not set
 # BR2_TARGET_ROOTFS_TAR is not set
+
+# Partitioned disk: ext2 boot partition + ext4 root, assembled by genimage.
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_RVEMURS_PATH)/board/rv-emu-rs/post-image-disk.sh"
+
+# OpenSBI fw_dynamic only; the kernel is loaded from the boot partition.
 BR2_TARGET_OPENSBI=y
 BR2_TARGET_OPENSBI_PLAT="generic"
-BR2_TARGET_OPENSBI_LINUX_PAYLOAD=y
-# Keep the FDT where the emulator put it (DTB_ADDRESS in src/emulator.rs).
-# OpenSBI otherwise relocates it to FW_PAYLOAD_FDT_OFFSET (0x2200000, i.e.
-# 0x82200000), which is inside the 39.4 MB kernel image and overwrites .rodata.
-BR2_TARGET_OPENSBI_ADDITIONAL_VARIABLES="FW_PAYLOAD_FDT_ADDR=0x87FFC000"
+BR2_TARGET_OPENSBI_INSTALL_DYNAMIC_IMG=y
+# BR2_TARGET_OPENSBI_LINUX_PAYLOAD is not set
+
+# U-Boot as the OpenSBI fw_dynamic S-mode payload. The default environment
+# auto-boots /Image from virtio partition 1 with the root on /dev/vda2.
+BR2_TARGET_UBOOT=y
+BR2_TARGET_UBOOT_CUSTOM_VERSION=y
+BR2_TARGET_UBOOT_CUSTOM_VERSION_VALUE="2026.07"
+BR2_TARGET_UBOOT_BUILD_SYSTEM_KCONFIG=y
+BR2_TARGET_UBOOT_USE_DEFCONFIG=y
+BR2_TARGET_UBOOT_BOARD_DEFCONFIG="qemu-riscv32_smode"
+BR2_TARGET_UBOOT_NEEDS_DTC=y
+BR2_TARGET_UBOOT_DEFAULT_ENV_FILE="$(BR2_EXTERNAL_RVEMURS_PATH)/board/rv-emu-rs/uboot.env"
+BR2_TARGET_UBOOT_FORMAT_BIN=y

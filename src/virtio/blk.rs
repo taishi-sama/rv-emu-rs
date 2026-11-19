@@ -22,6 +22,7 @@ use crate::{
 pub const IRQ: u32 = 12;
 pub const QUEUE_MAX: u32 = 128;
 
+const FEATURE_SIZE_MAX: u64 = 1 << 1;
 const FEATURE_SEG_MAX: u64 = 1 << 2;
 const FEATURE_RO: u64 = 1 << 5;
 const FEATURE_FLUSH: u64 = 1 << 9;
@@ -34,8 +35,12 @@ const STATUS_OK: u8 = 0;
 const STATUS_IOERR: u8 = 1;
 const STATUS_UNSUPP: u8 = 2;
 
-//A single request may be larger than one block; this only bounds a malicious guest.
-const MAX_IO_BYTES: u64 = 4 * 1024 * 1024;
+//A request may contain several segments. size_max is 4 MiB and seg_max is 16, so a
+//conforming driver's largest chain is 64 MiB; that total also bounds host memory.
+const MAX_IO_BYTES: u64 = 64 * 1024 * 1024;
+const SIZE_MAX: u32 = 4 * 1024 * 1024;
+const SEG_MAX: u32 = 16;
+const _: () = assert!(SIZE_MAX as u64 * SEG_MAX as u64 == MAX_IO_BYTES);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockOp {
@@ -93,7 +98,8 @@ impl VirtioBlk {
     pub fn new(io: Box<dyn BlockIo>) -> Self {
         let mut config = [0u8; 0x20];
         config[0..8].copy_from_slice(&(io.capacity() / 512).to_le_bytes());
-        config[0x0c..0x10].copy_from_slice(&(QUEUE_MAX - 2).to_le_bytes());
+        config[0x08..0x0c].copy_from_slice(&SIZE_MAX.to_le_bytes());
+        config[0x0c..0x10].copy_from_slice(&SEG_MAX.to_le_bytes());
         Self {
             io,
             config,
@@ -159,7 +165,8 @@ impl VirtioBlk {
             if descriptor.flags & DESC_F_WRITE == 0 {
                 return self.complete_error(queue, mem, chain, STATUS_IOERR);
             }
-            if descriptor.len as u64 > MAX_IO_BYTES || total + descriptor.len as u64 > MAX_IO_BYTES
+            if descriptor.len as u64 > SIZE_MAX as u64
+                || total + descriptor.len as u64 > MAX_IO_BYTES
             {
                 return self.complete_error(queue, mem, chain, STATUS_IOERR);
             }
@@ -218,7 +225,8 @@ impl VirtioBlk {
             if descriptor.flags & DESC_F_WRITE != 0 {
                 return self.complete_error(queue, mem, chain, STATUS_IOERR);
             }
-            if descriptor.len as u64 > MAX_IO_BYTES || total + descriptor.len as u64 > MAX_IO_BYTES
+            if descriptor.len as u64 > SIZE_MAX as u64
+                || total + descriptor.len as u64 > MAX_IO_BYTES
             {
                 return self.complete_error(queue, mem, chain, STATUS_IOERR);
             }
@@ -327,7 +335,7 @@ impl VirtioDevice for VirtioBlk {
     }
 
     fn features(&self) -> u64 {
-        let mut features = FEATURE_SEG_MAX | FEATURE_FLUSH | FEATURE_VERSION_1;
+        let mut features = FEATURE_SIZE_MAX | FEATURE_SEG_MAX | FEATURE_FLUSH | FEATURE_VERSION_1;
         if self.io.is_read_only() {
             features |= FEATURE_RO;
         }
@@ -358,7 +366,7 @@ impl VirtioDevice for VirtioBlk {
 
     fn queue_num_changed(&mut self, queue: u16, num: u32) {
         if queue == 0 {
-            let seg_max = num.saturating_sub(2);
+            let seg_max = num.saturating_sub(2).clamp(1, SEG_MAX);
             self.config[0x0c..0x10].copy_from_slice(&seg_max.to_le_bytes());
             self.config_generation = self.config_generation.wrapping_add(1);
         }
@@ -758,49 +766,53 @@ mod tests {
 
     impl TestMemory {
         fn new() -> Self {
+            Self::with_size(TEST_SIZE)
+        }
+
+        fn with_size(size: usize) -> Self {
             Self {
-                data: vec![0; TEST_SIZE],
+                data: vec![0; size],
             }
         }
 
-        fn offset(address: u32) -> Option<usize> {
+        fn offset(&self, address: u32) -> Option<usize> {
             let offset = address.checked_sub(TEST_BASE)? as usize;
-            (offset < TEST_SIZE).then_some(offset)
+            (offset < self.data.len()).then_some(offset)
         }
 
         fn write_u16(&mut self, address: u32, value: u16) {
-            let offset = Self::offset(address).unwrap();
+            let offset = self.offset(address).unwrap();
             self.data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
         }
 
         fn write_u32(&mut self, address: u32, value: u32) {
-            let offset = Self::offset(address).unwrap();
+            let offset = self.offset(address).unwrap();
             self.data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
 
         fn write_u64(&mut self, address: u32, value: u64) {
-            let offset = Self::offset(address).unwrap();
+            let offset = self.offset(address).unwrap();
             self.data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
         }
 
         fn read_byte(&self, address: u32) -> u8 {
-            self.data[Self::offset(address).unwrap()]
+            self.data[self.offset(address).unwrap()]
         }
 
         fn read_u16(&self, address: u32) -> u16 {
-            let offset = Self::offset(address).unwrap();
+            let offset = self.offset(address).unwrap();
             u16::from_le_bytes(self.data[offset..offset + 2].try_into().unwrap())
         }
 
         fn read_u32(&self, address: u32) -> u32 {
-            let offset = Self::offset(address).unwrap();
+            let offset = self.offset(address).unwrap();
             u32::from_le_bytes(self.data[offset..offset + 4].try_into().unwrap())
         }
     }
 
     impl GuestMemory for TestMemory {
         fn read_bytes(&self, address: u32, out: &mut [u8]) -> bool {
-            let Some(offset) = Self::offset(address) else {
+            let Some(offset) = self.offset(address) else {
                 return false;
             };
             let Some(end) = offset.checked_add(out.len()) else {
@@ -814,7 +826,7 @@ mod tests {
         }
 
         fn write_bytes(&mut self, address: u32, data: &[u8]) -> bool {
-            let Some(offset) = Self::offset(address) else {
+            let Some(offset) = self.offset(address) else {
                 return false;
             };
             let Some(end) = offset.checked_add(data.len()) else {
@@ -962,6 +974,135 @@ mod tests {
     }
 
     #[test]
+    fn large_read_uses_multiple_descriptors() {
+        const FIRST_LEN: u32 = 3 * 1024 * 1024;
+        const SECOND_LEN: u32 = 2 * 1024 * 1024;
+        const LARGE_DATA_ADDR: u32 = TEST_BASE + 0x10_0000;
+
+        let total = FIRST_LEN + SECOND_LEN;
+        let mut disk = vec![0u8; (total + 512) as usize];
+        disk[(total - 1) as usize] = 0x5a;
+        let (mut mmio, _handle) = new_mmio(disk, false);
+        let mut mem = TestMemory::with_size(8 * 1024 * 1024);
+        program_queue(&mut mmio);
+
+        mem.write_u32(HEADER_ADDR, TYPE_IN);
+        mem.write_u64(HEADER_ADDR + 8, 0);
+        set_descriptor(&mut mem, 0, HEADER_ADDR, 16, DESC_F_NEXT, 1);
+        set_descriptor(
+            &mut mem,
+            1,
+            LARGE_DATA_ADDR,
+            FIRST_LEN,
+            DESC_F_NEXT | DESC_F_WRITE,
+            2,
+        );
+        set_descriptor(
+            &mut mem,
+            2,
+            LARGE_DATA_ADDR + FIRST_LEN,
+            SECOND_LEN,
+            DESC_F_NEXT | DESC_F_WRITE,
+            3,
+        );
+        set_descriptor(&mut mem, 3, STATUS_ADDR, 1, DESC_F_WRITE, 0);
+        publish(&mut mem, 0);
+
+        write_reg(&mut mmio, 0x050, 0);
+        mmio.poll(&mut mem);
+
+        assert_eq!(mem.read_byte(STATUS_ADDR), STATUS_OK);
+        assert_eq!(mem.read_u16(USED_BASE + 2), 1);
+        assert_eq!(mem.read_u32(USED_BASE + 8), total + 1);
+        assert_eq!(mem.read_byte(LARGE_DATA_ADDR + total - 1), 0x5a);
+    }
+
+    #[test]
+    fn oversized_segment_is_rejected() {
+        let (mut mmio, _handle) = new_mmio(vec![0u8; SIZE_MAX as usize + 4096], false);
+        let mut mem = TestMemory::with_size(8 * 1024 * 1024);
+        program_queue(&mut mmio);
+        mem.write_u32(HEADER_ADDR, TYPE_IN);
+        mem.write_u64(HEADER_ADDR + 8, 0);
+        set_descriptor(&mut mem, 0, HEADER_ADDR, 16, DESC_F_NEXT, 1);
+        set_descriptor(
+            &mut mem,
+            1,
+            DATA_ADDR,
+            SIZE_MAX + 1,
+            DESC_F_NEXT | DESC_F_WRITE,
+            2,
+        );
+        set_descriptor(&mut mem, 2, STATUS_ADDR, 1, DESC_F_WRITE, 0);
+        publish(&mut mem, 0);
+
+        write_reg(&mut mmio, 0x050, 0);
+        mmio.poll(&mut mem);
+
+        assert_eq!(mem.read_byte(STATUS_ADDR), STATUS_IOERR);
+        assert_eq!(mem.read_u16(USED_BASE + 2), 1);
+    }
+
+    #[test]
+    fn full_segment_chain_is_accepted() {
+        let (mut mmio, _handle) = new_mmio(vec![0u8; MAX_IO_BYTES as usize], false);
+        let mut mem = TestMemory::with_size(8 * 1024 * 1024);
+        program_queue(&mut mmio);
+        mem.write_u32(HEADER_ADDR, TYPE_IN);
+        mem.write_u64(HEADER_ADDR + 8, 0);
+        set_descriptor(&mut mem, 0, HEADER_ADDR, 16, DESC_F_NEXT, 1);
+        for index in 0..SEG_MAX {
+            set_descriptor(
+                &mut mem,
+                index + 1,
+                DATA_ADDR,
+                SIZE_MAX,
+                DESC_F_NEXT | DESC_F_WRITE,
+                (index + 2) as u16,
+            );
+        }
+        set_descriptor(&mut mem, SEG_MAX + 1, STATUS_ADDR, 1, DESC_F_WRITE, 0);
+        publish(&mut mem, 0);
+
+        write_reg(&mut mmio, 0x050, 0);
+        mmio.poll(&mut mem);
+
+        assert_eq!(mem.read_byte(STATUS_ADDR), STATUS_OK);
+        assert_eq!(mem.read_u16(USED_BASE + 2), 1);
+        assert_eq!(mem.read_u32(USED_BASE + 8), MAX_IO_BYTES as u32 + 1);
+    }
+
+    #[test]
+    fn chain_over_the_total_limit_is_rejected() {
+        let (mut mmio, _handle) =
+            new_mmio(vec![0u8; (SEG_MAX as usize + 1) * SIZE_MAX as usize], false);
+        let mut mem = TestMemory::with_size(8 * 1024 * 1024);
+        program_queue(&mut mmio);
+        mem.write_u32(HEADER_ADDR, TYPE_IN);
+        mem.write_u64(HEADER_ADDR + 8, 0);
+        set_descriptor(&mut mem, 0, HEADER_ADDR, 16, DESC_F_NEXT, 1);
+        //SEG_MAX segments are accepted; one more crosses MAX_IO_BYTES.
+        for index in 0..=SEG_MAX {
+            set_descriptor(
+                &mut mem,
+                index + 1,
+                DATA_ADDR,
+                SIZE_MAX,
+                DESC_F_NEXT | DESC_F_WRITE,
+                (index + 2) as u16,
+            );
+        }
+        set_descriptor(&mut mem, SEG_MAX + 2, STATUS_ADDR, 1, DESC_F_WRITE, 0);
+        publish(&mut mem, 0);
+
+        write_reg(&mut mmio, 0x050, 0);
+        mmio.poll(&mut mem);
+
+        assert_eq!(mem.read_byte(STATUS_ADDR), STATUS_IOERR);
+        assert_eq!(mem.read_u16(USED_BASE + 2), 1);
+    }
+
+    #[test]
     fn write_request_updates_the_backend() {
         let (mut mmio, handle) = new_mmio(vec![0u8; 2048], false);
         let mut mem = TestMemory::new();
@@ -1044,6 +1185,7 @@ mod tests {
         assert_eq!(read_reg(&mut mmio, 0x010), 1);
         write_reg(&mut mmio, 0x014, 0);
         let low = read_reg(&mut mmio, 0x010);
+        assert_ne!(low & FEATURE_SIZE_MAX as u32, 0);
         assert_ne!(low & FEATURE_SEG_MAX as u32, 0);
         assert_ne!(low & FEATURE_FLUSH as u32, 0);
 
@@ -1065,14 +1207,20 @@ mod tests {
         let (mut mmio, _handle) = new_mmio(vec![0u8; 2048], false);
         assert_eq!(mmio.read_word(0x100).unwrap(), 4);
         assert_eq!(mmio.read_word(0x104).unwrap(), 0);
+        assert_eq!(mmio.read_word(0x108).unwrap(), SIZE_MAX);
+        assert_eq!(mmio.read_word(0x10c).unwrap(), SEG_MAX);
         assert_eq!(mmio.read_halfword(0x100).unwrap(), 4);
         assert_eq!(mmio.read_byte(0x100).unwrap(), 4);
         assert_eq!(mmio.read_word(0x0fc).unwrap(), 0);
 
         write_reg(&mut mmio, 0x030, 0);
         write_reg(&mut mmio, 0x038, 64);
-        assert_eq!(mmio.read_word(0x10c).unwrap(), 62);
-        assert_eq!(mmio.read_word(0x0fc).unwrap(), 1);
+        assert_eq!(mmio.read_word(0x10c).unwrap(), SEG_MAX);
+        write_reg(&mut mmio, 0x038, 4);
+        assert_eq!(mmio.read_word(0x10c).unwrap(), 2);
+        write_reg(&mut mmio, 0x038, 1);
+        assert_eq!(mmio.read_word(0x10c).unwrap(), 1);
+        assert_eq!(mmio.read_word(0x0fc).unwrap(), 3);
     }
 
     #[test]

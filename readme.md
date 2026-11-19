@@ -18,20 +18,31 @@ https://github.com/user-attachments/assets/7547b81b-a22c-4d94-8c82-70087b4962d8
 
 ## Buildroot Linux example
 
-Emulator is fully capable of running practically vanilla buildroot Linux images with minor adjustments in form of additionally enabled drivers and image layout configs.
+The emulator runs practically vanilla Buildroot Linux images with board drivers
+and image-layout adjustments.
 
-In case of pre-downloaded image:
-Unpack archived image, e.g.:
+For the prebuilt image, unpack the archives in `images/`:
+
 ```sh
-tar -xzf images/fw_payload.bin.tar.gz -C images
-```
-then run it
-```sh
-cargo run --profile maxspeed -- --payload images/fw_payload.bin
+tar -xzf images/uboot-boot.tar.gz -C images
+tar -xzf images/rv-emu-rs-disk.tar.gz -C images
 ```
 
-And log in on the emulator window (the framebuffer VT is the preferred console),
-then run either
+Then run it:
+
+```sh
+cargo run --profile maxspeed -- --uboot \
+    images/fw_dynamic.bin images/u-boot.bin \
+    --disk images/rv-emu-rs-disk.img
+```
+
+Log in
+on the emulator window with `root` login, then run
+either
+
+```sh
+./doom
+```
 
 ```sh
 ./doom_demo.sh
@@ -40,48 +51,34 @@ then run either
 ```sh
 ./doom_timedemo.sh
 ```
+
 or
 
 ```sh
 coremark
 ```
 
-The serial port receives kernel and `earlycon` messages in both cases; the
-preferred console (and therefore the login shell) follows the selected device
-tree. `--no-display` selects the serial-console variant automatically.
+The serial port receives kernel and `earlycon` messages. For a headless serial
+login, add `--no-display`; the emulator selects `rv-emu-rs-sv32-nodisplay.dtb`,
+and U-Boot copies the kernel command line and its `console=` order from that
+tree's `/chosen/bootargs`. Pass a DTB as the third path to override the default.
 
-Full instruction how to build buildroot from scratch is described in [BUILDROOT.md](./BUILDROOT.md)
-Essentially just run download buildroot, (optionally) download doom1.wad for PRBOOM that runs inside emulator, place according instruction, run described commands.
+Full instructions for building the disk image from scratch are in
+[BUILDROOT.md](./BUILDROOT.md).
 
 # Running
 
-```sh
-cargo run --profile maxspeed -- --payload images/fw_payload.bin
-```
+The canonical Linux command is in the example above. `rv-emu-rs --help` lists
+the boot modes and options. Without an explicit DTB the emulator uses
+`rv-emu-rs-sv32.dtb`, which makes the framebuffer VT the preferred console; with
+`--no-display` it selects `rv-emu-rs-sv32-nodisplay.dtb` for the serial console.
+Audio is optional: on hosts without a sound device the emulator keeps running
+and silently drops samples. The window forwards the host keyboard and an
+absolute pointer to the guest; keyboard and button events are active while the
+window has focus.
 
-`rv-emu-rs --help` lists the boot modes and options. Without an explicit DTB the emulator
-uses `rv-emu-rs-sv32.dtb`, which makes the framebuffer VT the login console. With
-`--no-display` it uses `rv-emu-rs-sv32-nodisplay.dtb`, which keeps the serial console as the
-login shell, so headless boots remain interactive. Audio is optional: on hosts without a
-sound device the emulator keeps running and silently drops samples. The window forwards the
-host keyboard and an absolute pointer to the guest; keyboard and button events are active
-while the window has focus.
-
-The F and D extensions are built in by default; a strict RV32IMAC build without them is
-`cargo run --no-default-features`.
-
-A raw image can be attached as a virtio-blk disk (`/dev/vda`) with:
-
-```sh
-truncate -s 64M /tmp/virtio-disk.img
-mkfs.ext4 -F -q /tmp/virtio-disk.img
-cargo run --profile maxspeed -- --payload images/fw_payload.bin \
-    --disk /tmp/virtio-disk.img
-```
-
-Add `--disk-ro` to advertise the disk as read-only. The kernel image is expected to have
-`CONFIG_VIRTIO_MMIO`, `CONFIG_VIRTIO_BLK` and the filesystem driver built in; the emulator
-does not require a PCI bus.
+The F and D extensions are built in by default; a strict RV32IMAC build without
+them is `cargo run --no-default-features`.
 
 # Developing
 
@@ -113,9 +110,10 @@ DOOM is © 1993 id Software, Inc. `doom1.wad` is the shareware episode's game
 data; it is proprietary, not free software, and is not covered by the GPL
 source release.
 
-The prebuilt image `images/fw_payload.bin.tar.gz` contains this WAD so the
-example boots without extra downloads; redistributing that image redistributes
-the shareware data under id Software's shareware terms. The overlay copy in
+The prebuilt disk image `images/rv-emu-rs-disk.tar.gz` contains this WAD, so
+the example boots without extra downloads; redistributing the image
+redistributes the shareware data under id Software's shareware terms. The
+overlay copy in
 `buildroot/board/rv-emu-rs/rootfs-overlay/usr/share/games/doom/` is a local
 build input and is excluded from git.
 
